@@ -1,0 +1,428 @@
+import json
+import os
+import random
+
+SAVE_FILE = "save.json"
+
+# ------------------ TYPE EFFECTIVENESS ------------------
+
+TYPE_EFFECTIVENESS = {
+    "Fire": {"Grass": 2, "Water": 0.5, "Fire": 0.5},
+    "Water": {"Fire": 2, "Grass": 0.5, "Water": 0.5},
+    "Grass": {"Water": 2, "Fire": 0.5, "Grass": 0.5},
+    "Electric": {"Water": 2, "Grass": 0.5, "Electric": 0.5},
+    "Normal": {}
+}
+
+# ------------------ POKEMON CLASS ------------------
+
+class Pokemon:
+    def __init__(self, name, level, hp, attack, defense, moves, type_):
+        self.name = name
+        self.level = level
+        self.hp = hp
+        self.current_hp = hp
+        self.attack = attack
+        self.defense = defense
+        self.moves = moves
+        self.type = type_
+
+    def is_fainted(self):
+        return self.current_hp <= 0
+
+    def heal_full(self):
+        self.current_hp = self.hp
+
+    def calculate_damage(self, move, defender):
+        move_data = self.moves[move]
+        base_damage = move_data["power"] + self.attack - defender.defense
+        effectiveness = TYPE_EFFECTIVENESS.get(move_data["type"], {}).get(defender.type, 1)
+        total_damage = max(1, int(base_damage * effectiveness))
+        return total_damage, effectiveness
+
+    def gain_exp(self, exp):
+        self.level += 1
+        self.hp += 2
+        self.attack += 1
+        self.defense += 1
+        print(f"{self.name} grew to level {self.level}!")
+
+# ------------------ PLAYER CLASS ------------------
+
+class Player:
+    def __init__(self, name):
+        self.name = name
+        self.team = [
+            Pokemon("Charmander", 5, 20, 10, 8,
+                    {"Scratch": {"power": 5, "type": "Normal"},
+                     "Ember": {"power": 6, "type": "Fire"}}, "Fire")
+        ]
+        self.items = {"Potion": 2, "Pokéball": 3}
+        self.money = 0
+
+    def choose_pokemon(self):
+        print("\nYour Pokémon:")
+        for i, p in enumerate(self.team, 1):
+            print(f"{i}. {p.name} (Lv {p.level}) HP: {p.current_hp}/{p.hp}")
+        choice = int(input("Choose a Pokémon: ")) - 1
+        return self.team[choice]
+
+    def show_team(self):
+        print("\n--- Your Pokémon ---")
+        for p in self.team:
+            print(f"{p.name} (Lv {p.level}) HP: {p.current_hp}/{p.hp}")
+
+    def add_money(self, amount):
+        self.money += amount
+        print(f"You earned ${amount}! You now have ${self.money}.")
+
+    def spend_money(self, amount):
+        if self.money >= amount:
+            self.money -= amount
+            return True
+        else:
+            print("You don’t have enough money!")
+            return False
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "money": self.money,
+            "items": self.items,
+            "team": [
+                {
+                    "name": p.name,
+                    "level": p.level,
+                    "hp": p.hp,
+                    "current_hp": p.current_hp,
+                    "attack": p.attack,
+                    "defense": p.defense,
+                    "moves": p.moves,
+                    "type": p.type,
+                }
+                for p in self.team
+            ],
+        }
+
+# ------------------ BATTLE CLASS ------------------
+
+class Battle:
+    def __init__(self, player, player_pokemon, enemy_pokemon):
+        self.player = player
+        self.player_pokemon = player_pokemon
+        self.enemy_pokemon = enemy_pokemon
+
+    def run(self):
+        print(f"\nA wild {self.enemy_pokemon.name} appeared!")
+        while not self.player_pokemon.is_fainted() and not self.enemy_pokemon.is_fainted():
+            print(f"\n{self.player_pokemon.name} HP: {self.player_pokemon.current_hp}/{self.player_pokemon.hp}")
+            print(f"{self.enemy_pokemon.name} HP: {self.enemy_pokemon.current_hp}/{self.enemy_pokemon.hp}")
+
+            print("Available moves:")
+            for move in self.player_pokemon.moves:
+                print(f"- {move} ({self.player_pokemon.moves[move]['type']})")
+
+            move = input("Type the move name: ").strip().title()
+            if move not in self.player_pokemon.moves:
+                print("Invalid move name! Try again.")
+                continue
+
+            # Player attack
+            dmg, eff = self.player_pokemon.calculate_damage(move, self.enemy_pokemon)
+            self.enemy_pokemon.current_hp -= dmg
+            print(f"{self.player_pokemon.name} used {move}! It dealt {dmg} damage!")
+            if eff > 1:
+                print("It's super effective!")
+            elif eff < 1:
+                print("It's not very effective...")
+
+            if self.enemy_pokemon.is_fainted():
+                print(f"{self.enemy_pokemon.name} fainted!")
+                self.player_pokemon.gain_exp(10)
+                if hasattr(self.enemy_pokemon, "is_trainer_pokemon") and self.enemy_pokemon.is_trainer_pokemon:
+                    self.player.add_money(25)
+                else:
+                    self.player.add_money(5)
+                return "win"
+
+            # Enemy attack
+            enemy_move = random.choice(list(self.enemy_pokemon.moves.keys()))
+            dmg, eff = self.enemy_pokemon.calculate_damage(enemy_move, self.player_pokemon)
+            self.player_pokemon.current_hp -= dmg
+            print(f"The enemy {self.enemy_pokemon.name} used {enemy_move}! It dealt {dmg} damage!")
+
+            if self.player_pokemon.is_fainted():
+                print(f"{self.player_pokemon.name} fainted! You lost the battle.")
+                return "lose"
+
+# ------------------ WORLD AND LOCATIONS ------------------
+
+class Location:
+    def __init__(self, name, description, connections, events):
+        self.name = name
+        self.description = description
+        self.connections = connections
+        self.events = events
+
+class World:
+    def __init__(self, game):
+        self.game = game
+        self.locations = self.create_world()
+        self.current_location = self.locations["Pallet Town"]
+
+    def create_world(self):
+        return {
+            "Pallet Town": Location(
+                "Pallet Town",
+                "Your peaceful hometown. Professor Oak's Lab is here.",
+                {"north": "Route 1"},
+                ["pokecenter", "pokemart"]
+            ),
+            "Route 1": Location(
+                "Route 1",
+                "A grassy path with wild Pokémon.",
+                {"south": "Pallet Town", "north": "Viridian City"},
+                ["wild_encounter"]
+            ),
+            "Viridian City": Location(
+                "Viridian City",
+                "A bustling town with a Pokémon Center and Gym.",
+                {"south": "Route 1"},
+                ["pokecenter", "pokemart", "visit_gym"]
+            ),
+        }
+
+    def move(self):
+        print(f"\n📍 {self.current_location.name}")
+        print(self.current_location.description)
+        print("\nYou can go:")
+        for direction in self.current_location.connections:
+            print(f"- {direction.title()} to {self.current_location.connections[direction]}")
+
+        direction = input("> ").lower()
+        if direction in self.current_location.connections:
+            self.current_location = self.locations[self.current_location.connections[direction]]
+            self.trigger_events()
+        else:
+            print("You can't go that way!")
+
+    def trigger_events(self):
+        town_services = []
+        auto_events = []
+
+        for event in self.current_location.events:
+            if event in ("pokecenter", "pokemart", "visit_gym"):
+                town_services.append(event)
+            else:
+                auto_events.append(event)
+
+        # Handle auto events (like wild Pokémon)
+        for event in auto_events:
+            self.handle_event(event)
+
+        if town_services:
+            # --- Town menu ---
+            while True:
+                print(f"\n📍 {self.current_location.name}")
+                print("You look around the town. What would you like to do?")
+                for i, e in enumerate(town_services, 1):
+                    if e == "pokecenter":
+                        print(f"{i}. Visit Pokémon Center")
+                    elif e == "pokemart":
+                        print(f"{i}. Visit PokéMart")
+                    elif e == "visit_gym":
+                        print(f"{i}. Challenge the Gym Leader")
+
+                print(f"{len(town_services) + 1}. Open Menu")
+                print(f"{len(town_services) + 2}. Leave Town")
+
+                choice = input("> ").strip()
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(town_services):
+                        self.handle_event(town_services[idx])
+                    elif idx == len(town_services):
+                        self.game.main_menu()
+                    elif idx == len(town_services) + 1:
+                        print("You continue on your way.")
+                        break
+                    else:
+                        print("Invalid choice.")
+                except ValueError:
+                    print("Invalid choice.")
+        else:
+            # --- Routes ---
+            while True:
+                print(f"\n📍 {self.current_location.name}")
+                print(self.current_location.description)
+                print("\nWhat would you like to do?")
+                print("1. Explore (may trigger wild battles)")
+                print("2. Open Menu")
+                print("3. Move to another area")
+
+                choice = input("> ").strip()
+                if choice == "1":
+                    for event in auto_events:
+                        self.handle_event(event)
+                elif choice == "2":
+                    self.game.main_menu()
+                elif choice == "3":
+                    self.move()
+                    break
+                else:
+                    print("Invalid choice.")
+
+    def handle_event(self, event_name):
+        if event_name == "wild_encounter":
+            enemy = Pokemon(
+                random.choice(["Pidgey", "Rattata", "Caterpie"]),
+                random.randint(3, 5),
+                15, 7, 5,
+                {"Tackle": {"power": 5, "type": "Normal"}}, "Normal"
+            )
+            player_pokemon = self.game.player.choose_pokemon()
+            battle = Battle(self.game.player, player_pokemon, enemy)
+            battle.run()
+
+        elif event_name == "pokecenter":
+            print("\n🏥 Welcome to the Pokémon Center!")
+            for p in self.game.player.team:
+                p.heal_full()
+            print("Your Pokémon have been fully healed!")
+
+        elif event_name == "pokemart":
+            print("\n🏪 Welcome to the PokéMart!")
+            prices = {"Potion": 10, "Pokéball": 15}
+            while True:
+                print(f"\nYou have ${self.game.player.money}.")
+                print("1. Buy Potion ($10)\n2. Buy Pokéball ($15)\n3. Leave")
+                choice = input("> ")
+                if choice == "1":
+                    if self.game.player.spend_money(prices["Potion"]):
+                        self.game.player.items["Potion"] += 1
+                        print("You bought a Potion!")
+                elif choice == "2":
+                    if self.game.player.spend_money(prices["Pokéball"]):
+                        self.game.player.items["Pokéball"] += 1
+                        print("You bought a Pokéball!")
+                elif choice == "3":
+                    print("Thank you! Come again!")
+                    break
+                else:
+                    print("Invalid choice.")
+
+        elif event_name == "visit_gym":
+            print("\n🏟️ The Gym is closed for now. Come back later!")
+
+# ------------------ GAME CLASS ------------------
+
+class Game:
+    def __init__(self):
+        self.player = None
+        self.world = None
+
+    def start(self):
+        print("Welcome to the world of Pokémon!")
+        while True:
+            print("\n1. New Game")
+            print("2. Load Game")
+            print("3. Quit")
+            choice = input("> ").strip()
+            if choice == "1":
+                name = input("What is your name, Trainer? ")
+                self.player = Player(name)
+                self.world = World(self)
+                print(f"Welcome, {name}! Your adventure begins in Pallet Town.")
+                self.world.current_location = self.world.locations["Pallet Town"]
+                self.world.trigger_events()
+                self.main_menu()
+                break
+            elif choice == "2":
+                if self.load_game():
+                    self.main_menu()
+                    break
+                else:
+                    print("No save found. Please start a new game.")
+            elif choice == "3":
+                print("Goodbye!")
+                break
+            else:
+                print("Invalid choice.")
+
+    def main_menu(self):
+        while True:
+            print("\n=== Main Menu ===")
+            print("1. Explore the world")
+            print("2. View Pokémon")
+            print("3. View Bag")
+            print("4. Save Game")
+            print("5. Load Game")
+            print("6. Quit")
+
+            choice = input("> ").strip()
+            if choice == "1":
+                self.world.move()
+            elif choice == "2":
+                self.player.show_team()
+            elif choice == "3":
+                print(f"Items: {self.player.items}")
+                print(f"Money: ${self.player.money}")
+            elif choice == "4":
+                self.save_game()
+            elif choice == "5":
+                if self.load_game():
+                    print("Save loaded successfully!")
+                else:
+                    print("Failed to load save.")
+            elif choice == "6":
+                print("Goodbye!")
+                break
+            else:
+                print("Invalid choice.")
+
+    def save_game(self):
+        data = {"player": self.player.to_dict(), "location": self.world.current_location.name}
+        with open(SAVE_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+        print("Game saved!")
+
+    def load_game(self):
+        if not os.path.exists(SAVE_FILE):
+            print("No save file found.")
+            return False
+        with open(SAVE_FILE, "r") as f:
+            data = json.load(f)
+
+        self.player = Player(data["player"]["name"])
+        self.player.money = data["player"].get("money", 0)
+        self.player.items = data["player"].get("items", {"Potion": 0, "Pokéball": 0})
+
+        self.player.team = []
+        for poke_data in data["player"].get("team", []):
+            p = Pokemon(
+                poke_data["name"],
+                poke_data["level"],
+                poke_data["hp"],
+                poke_data["attack"],
+                poke_data["defense"],
+                poke_data["moves"],
+                poke_data["type"]
+            )
+            p.current_hp = poke_data.get("current_hp", p.hp)
+            self.player.team.append(p)
+
+        self.world = World(self)
+        location_name = data.get("location", "Pallet Town")
+        if location_name in self.world.locations:
+            self.world.current_location = self.world.locations[location_name]
+        else:
+            self.world.current_location = self.world.locations["Pallet Town"]
+
+        print(f"Game loaded! Welcome back to {self.world.current_location.name}, {self.player.name}.")
+        return True
+
+# ------------------ MAIN EXECUTION ------------------
+
+if __name__ == "__main__":
+    game = Game()
+    game.start()
