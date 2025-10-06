@@ -1,0 +1,891 @@
+# ==========================================
+# 🌑 POKE ENGINE THING — TEST BUILD
+#    v1.4 — "Friends & Foes Update"
+#    DOES NOT REFLECT HOW GAME WILL ACTUALLY PLAY UWU
+# ==========================================
+
+import json, os, random, time
+
+# ------------------------------
+# Config / Global Data
+# ------------------------------
+SAVE_FILE = "save.json"
+BROWSER_SAVE = None  # in-memory save for browser runners
+
+# Simple (small) Pokédex for the engine — add more entries as needed
+POKEDEX = {
+    "Snivy": {"type": "Grass", "base_hp": 24, "base_atk": 9, "base_def": 8, "moves": {"Tackle": {"power":5,"type":"Normal"}, "Vine Whip": {"power":7,"type":"Grass"}}},
+    "Tepig": {"type": "Fire", "base_hp": 26, "base_atk": 10, "base_def": 8, "moves": {"Tackle": {"power":5,"type":"Normal"}, "Ember": {"power":7,"type":"Fire"}}},
+    "Oshawott": {"type": "Water", "base_hp": 25, "base_atk": 9, "base_def": 9, "moves": {"Tackle": {"power":5,"type":"Normal"}, "Water Gun": {"power":7,"type":"Water"}}},
+    "Pidgey": {"type":"Flying","base_hp":20,"base_atk":7,"base_def":6,"moves":{"Tackle":{"power":5,"type":"Normal"},"Gust":{"power":6,"type":"Flying"}}},
+    "Rattata": {"type":"Normal","base_hp":18,"base_atk":6,"base_def":5,"moves":{"Tackle":{"power":5,"type":"Normal"}}},
+    "Cyndaquil": {"type":"Fire","base_hp":24,"base_atk":9,"base_def":7,"moves":{"Tackle":{"power":5,"type":"Normal"},"Ember":{"power":7,"type":"Fire"}}}
+    # add more Pokémon as needed...
+}
+
+TYPE_EFFECTIVENESS = {
+    "Fire": {"Grass": 2, "Water": 0.5, "Fire": 0.5},
+    "Water": {"Fire": 2, "Grass": 0.5, "Water": 0.5},
+    "Grass": {"Water": 2, "Fire": 0.5, "Grass": 0.5},
+    "Electric": {"Water": 2},
+    "Normal": {}
+}
+
+# Food preferences by type (likes/dislikes)
+FOOD_PREFERENCES = {
+    "Fire": {"likes":"Spicy Berry", "dislikes":"Soft Fruit"},
+    "Water": {"likes":"Soft Fruit", "dislikes":"Spicy Berry"},
+    "Grass": {"likes":"Sweet Fruit", "dislikes":"Spicy Berry"},
+    "Flying": {"likes":"Seed Mix", "dislikes":"Hard Meat"},
+    "Normal": {"likes":"Any Fruit", "dislikes":None},
+    "Dark": {"likes":"Bitter Herb", "dislikes":"Sweet Fruit"},
+    # defaults for other types can be added...
+}
+
+# PokéMart inventory (organized)
+POKEMART_ITEMS = {
+    "balls": {
+        "Pokeball": {"price": 200, "desc": "A standard Poké Ball. Good for weak Pokémon."},
+        "Great Ball": {"price": 600, "desc": "Better capture rate than a Poké Ball."},
+        "Ultra Ball": {"price": 1200, "desc": "High success rate for tough Pokémon."},
+        "Friend Ball": {"price": 800, "desc": "Works best on Pokémon that already trust you."}
+    },
+    "food": {
+        "Spicy Berry": {"price": 50, "desc": "Favored by Fire-types. Great for bonding."},
+        "Soft Fruit": {"price": 40, "desc": "Gentle fruit. Calms many Pokémon."},
+        "Sweet Fruit": {"price": 50, "desc": "Loved by Grass/Fairy-types."},
+        "Seed Mix": {"price": 30, "desc": "Favored by Flying-types."}
+    },
+    "healing": {
+        "Potion": {"price": 300, "desc": "Restores 20 HP to a Pokémon."},
+        "Super Potion": {"price": 700, "desc": "Restores 50 HP to a Pokémon."}
+    },
+    "status": {
+        "Antidote": {"price": 100, "desc": "Cures poison."},
+        "Paralyze Heal": {"price": 150, "desc": "Cures paralysis."}
+    }
+}
+
+# Forage areas and loot tables
+FORAGE_AREAS = {
+    "Verdant Trail": {"common":["Sweet Fruit","Soft Fruit"], "rare":["Golden Berry"], "danger":0.25},
+    "Scorched Forest": {"common":["Spicy Berry"], "rare":["Charred Root"], "danger":0.40},
+    "Ruined Park": {"common":["Soft Fruit"], "rare":["Shadow Fruit"], "danger":0.35}
+}
+
+# Dialogues
+import random
+CENTER_DIALOGUE_ENTER = [
+    "Welcome... you look exhausted. Let's get your Pokémon patched up.",
+    "Another survivor, huh? You and your team made it back — barely.",
+    "Even in chaos, healing still matters. Let me take care of your Pokémon.",
+    "It’s dangerous out there. Don’t push them too hard… or yourself."
+]
+CENTER_DIALOGUE_HEALING = [
+    "Your Pokémon’s pulse is faint… just a second…",
+    "I can still save them…",
+    "The machine’s slower now, but it’ll do its best.",
+    "They’ll pull through. They always do — mostly."
+]
+CENTER_DIALOGUE_DONE = [
+    "They’re stable. Try not to let it happen again.",
+    "Your team’s ready. May you both survive another day.",
+    "All patched up. Be careful out there — not everyone comes back.",
+    "Your Pokémon are healed… for now."
+]
+MART_DIALOGUE_ENTER = [
+    "Welcome to the PokéMart. Don’t mind the boarded windows.",
+    "We’re still open. Somehow.",
+    "Looking to trade hope for supplies?",
+    "Ah, a trainer. Good — we need your kind."
+]
+MART_DIALOGUE_OFFER = [
+    "Supplies are scarce, but I’ll share what I have.",
+    "Prices went up again… sorry, that’s survival for you.",
+    "If your Pokémon trusts you, a Friend Ball might save a life.",
+    "We got new stock — berries, balls, and bandages. Take your pick."
+]
+MART_DIALOGUE_BUY = [
+    "Stay alive out there.",
+    "That’s a good choice — might just keep you breathing.",
+    "Pleasure doing business. For now.",
+    "I miss when this was just about catching Rattata."
+]
+NPC_DIALOGUE = [
+    "Team Dominion took my Growlithe… said it wasn’t loyal enough.",
+    "They say the wild Pokémon have started organizing. That can’t be true… right?",
+    "Pokémon used to smile when they saw us. Now they flinch.",
+    "Friend Balls don’t always work. Sometimes… they still run."
+]
+
+# Starter definitions (Unova only)
+STARTERS = {
+    "Snivy": {"type":"Grass","desc":"Cautious and watchful. It studies you before it moves."},
+    "Tepig": {"type":"Fire","desc":"Scarred, stubborn, and ready to prove itself."},
+    "Oshawott": {"type":"Water","desc":"Shaken but loyal; clings to its scalchop."}
+}
+
+# ------------------------------
+# Engine Classes
+# ------------------------------
+class Pokemon:
+    def __init__(self, name, level, base_hp, base_atk, base_def, moves, ptype):
+        self.name = name
+        self.level = level
+        self.max_hp = base_hp + level * 2
+        self.attack = base_atk + level
+        self.defense = base_def + level
+        self.current_hp = self.max_hp
+        self.moves = moves.copy()
+        self.type = ptype
+        self.trust = 0  # trust used by feeding system
+
+    def is_fainted(self):
+        return self.current_hp <= 0
+
+    def heal_full(self):
+        self.current_hp = self.max_hp
+
+    def calculate_damage(self, move, target):
+        data = self.moves.get(move)
+        if not data:
+            return 1, 1
+        base = data["power"] + self.attack - target.defense
+        eff = TYPE_EFFECTIVENESS.get(data["type"], {}).get(target.type, 1)
+        dmg = max(1, int(base * eff))
+        return dmg, eff
+
+    def gain_exp(self, xp):
+        # simple leveling: every call increases level by 1
+        self.level += 1
+        self.max_hp += 2
+        self.attack += 1
+        self.defense += 1
+        self.heal_full()
+        print(f"✨ {self.name} grew to Lv.{self.level}!")
+
+class Player:
+    def __init__(self, name):
+        self.name = name
+        self.team = []  # list of Pokemon objects
+        self.bag = {
+            "food": {"Soft Fruit":2, "Spicy Berry":1},
+            "balls": {"Pokeball":5, "Friend Ball":1},
+            "healing": {"Potion":2},
+            "status": {}
+        }
+        self.money = 100
+        self.box = []  # PC box snapshots
+        self.last_town = "Nuvema Outpost"
+
+    def add_pokemon(self, pkmn: Pokemon):
+        if len(self.team) < 6:
+            self.team.append(pkmn)
+            print(f"🎉 {pkmn.name} joined your team!")
+        else:
+            # store minimal snapshot in box
+            snapshot = {"name": pkmn.name, "level": pkmn.level, "hp": pkmn.max_hp, "current_hp": pkmn.current_hp, "type": pkmn.type}
+            self.box.append(snapshot)
+            print(f"Your team is full. {pkmn.name} was sent to the PC box.")
+
+    def choose_active(self):
+        healthy = [p for p in self.team if not p.is_fainted()]
+        if not healthy:
+            return None
+        print("\nChoose your active Pokémon:")
+        for i,p in enumerate(healthy,1):
+            print(f"{i}. {p.name} Lv{p.level} ({p.current_hp}/{p.max_hp} HP)")
+        while True:
+            c = input("> ").strip()
+            if c.isdigit() and 1 <= int(c) <= len(healthy):
+                return healthy[int(c)-1]
+            print("Invalid selection.")
+
+    def show_team(self):
+        print("\n=== Your Team ===")
+        if not self.team:
+            print("(No Pokémon)")
+            return
+        for p in self.team:
+            status = " (FNT)" if p.is_fainted() else ""
+            print(f"- {p.name} Lv{p.level} HP {p.current_hp}/{p.max_hp}{status} Trust:{p.trust}")
+
+    def has_item(self, category, item):
+        return self.bag.get(category, {}).get(item, 0) > 0
+
+    def remove_item(self, category, item, qty=1):
+        if self.has_item(category, item):
+            self.bag[category][item] -= qty
+            if self.bag[category][item] <= 0:
+                del self.bag[category][item]
+            return True
+        return False
+
+    def add_item(self, category, item, qty=1):
+        self.bag.setdefault(category, {})
+        self.bag[category][item] = self.bag[category].get(item, 0) + qty
+
+    def all_fainted(self):
+        return len(self.team)>0 and all(p.is_fainted() for p in self.team)
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "money": self.money,
+            "bag": self.bag,
+            "team": [
+                {"name":p.name,"level":p.level,"max_hp":p.max_hp,"current_hp":p.current_hp,"attack":p.attack,"defense":p.defense,"moves":p.moves,"type":p.type,"trust":p.trust}
+                for p in self.team
+            ],
+            "box": self.box,
+            "last_town": self.last_town
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        pl = cls(data.get("name","Trainer"))
+        pl.money = data.get("money",0)
+        pl.bag = data.get("bag", {"food":{}, "balls":{}, "healing":{}, "status":{}})
+        pl.box = data.get("box", [])
+        pl.last_town = data.get("last_town","Nuvema Outpost")
+        pl.team = []
+        for pd in data.get("team", []):
+            info = POKEDEX.get(pd["name"], None)
+            if info:
+                p = Pokemon(pd["name"], pd["level"], info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+                p.current_hp = pd.get("current_hp", p.max_hp)
+                p.trust = pd.get("trust", 0)
+                pl.team.append(p)
+        return pl
+
+# ------------------------------
+# Battle & Capture Logic
+# ------------------------------
+def attempt_catch_with_ball(player: Player, wild: Pokemon, ball_name: str):
+    # ball modifiers
+    base = max(0.01, (1 - wild.current_hp / wild.max_hp) * 0.6)  # HP factor weighted higher
+    trust_factor = min(0.5, wild.trust / 200.0)  # trust helps
+    ball_mods = {"Pokeball": 0.1, "Great Ball": 0.2, "Ultra Ball": 0.3, "Friend Ball": 0.15}
+    mod = ball_mods.get(ball_name, 0.0)
+    chance = base + trust_factor + mod
+    chance = min(chance, 0.95)
+    roll = random.random()
+    print(f"(Catch roll: {roll:.2f} <= {chance:.2f})")
+    if roll <= chance:
+        player.remove_item("balls", ball_name, 1)
+        player.add_pokemon(wild)
+        return True
+    else:
+        player.remove_item("balls", ball_name, 1)
+        wild.trust = max(0, wild.trust - 5)
+        return False
+
+def feed_pokemon_turn(player: Player, wild: Pokemon):
+    foods = player.bag.get("food", {})
+    if not foods:
+        print("You have no food to feed.")
+        return
+    print("\nSelect food to feed:")
+    items = list(foods.items())
+    for i,(name,qty) in enumerate(items,1):
+        print(f"{i}. {name} x{qty}")
+    choice = input("> ").strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(items)):
+        print("Cancelled feeding.")
+        return
+    food_name = items[int(choice)-1][0]
+    # apply effects
+    prefs = FOOD_PREFERENCES.get(wild.type, {})
+    if food_name == prefs.get("likes"):
+        wild.trust += 20
+        print(f"{wild.name} eagerly eats the {food_name}! Trust +20.")
+    elif food_name == prefs.get("dislikes"):
+        wild.trust = max(0, wild.trust - 10)
+        print(f"{wild.name} dislikes the {food_name}... Trust -10.")
+    else:
+        wild.trust += 5
+        print(f"{wild.name} eats the {food_name}. Trust +5.")
+    player.remove_item("food", food_name, 1)
+
+# Battle main loop (wild or trainer). Trainer_name==None => wild
+def battle_loop(game, player: Player, active: Pokemon, opponent: Pokemon, trainer_name=None):
+    print()
+    if trainer_name:
+        print(f"⚔️ Trainer {trainer_name} challenges you!")
+        print(f"👤 {trainer_name}: 'Let's see what you're made of.'")
+    else:
+        print(f"⚔️ A wild {opponent.name} appears!")
+    while True:
+        if active.is_fainted():
+            if player.all_fainted():
+                # faint-respawn handled by caller or here
+                print("\nAll your Pokémon have fainted!")
+                print("💫 You run back to the Pokémon Center, your Pokéballs in your hands, protecting them from further harm...")
+                game.respawn_player()
+                return "fainted"
+            else:
+                print(f"{active.name} has fainted. Choose another Pokémon.")
+                active = player.choose_active()
+                if active is None:
+                    print("You couldn't continue the battle.")
+                    game.respawn_player()
+                    return "fainted"
+
+        if opponent.is_fainted():
+            # victory
+            print(f"{opponent.name} fainted!")
+            xp = 5 + opponent.level
+            active.gain_exp(xp)
+            reward = 25 if trainer_name else 5
+            if reward > 0:
+                player.money += reward
+                print(f"💵 You earned ${reward}!")
+            return "win"
+
+        # show status
+        print(f"\n{active.name} HP: {active.current_hp}/{active.max_hp} | {opponent.name} HP: {opponent.current_hp}/{opponent.max_hp} | Trust: {opponent.trust}")
+        print("Actions: 1) Fight  2) Feed (use food)  3) Bag  4) Throw Ball  5) Run")
+        cmd = input("> ").strip()
+        if cmd == "1":  # Fight
+            # list moves
+            moves = list(active.moves.keys())
+            for i,m in enumerate(moves,1):
+                print(f"{i}. {m} (Power {active.moves[m]['power']}, Type {active.moves[m]['type']})")
+            sel = input("> ").strip()
+            if not sel.isdigit() or not (1 <= int(sel) <= len(moves)):
+                print("Invalid move.")
+                continue
+            move_name = moves[int(sel)-1]
+            dmg,eff = active.calculate_damage(move_name, opponent)
+            opponent.current_hp = max(0, opponent.current_hp - dmg)
+            msg = "Super effective!" if eff>1 else "Not very effective..." if eff<1 else ""
+            print(f"{active.name} used {move_name}! {dmg} dmg. {msg}")
+        elif cmd == "2":  # Feed
+            feed_pokemon_turn(player, opponent)
+            # if trust reached threshold, hint to use Friend Ball
+            if opponent.trust >= 70:
+                print(f"{opponent.name} seems calm and trusting now. You might use a Friend Ball to invite it.")
+        elif cmd == "3":  # Bag (use items)
+            open_bag_in_battle(player, opponent)
+        elif cmd == "4":  # Throw Ball
+            if not player.bag.get("balls"):
+                print("You have no balls!")
+            else:
+                print("Choose a ball to throw:")
+                balls = list(player.bag["balls"].items())
+                for i,(bname,qty) in enumerate(balls,1):
+                    print(f"{i}. {bname} x{qty}")
+                sel = input("> ").strip()
+                if not sel.isdigit() or not (1 <= int(sel) <= len(balls)):
+                    print("Cancelled.")
+                else:
+                    ball_name = balls[int(sel)-1][0]
+                    # Friend Ball peaceful capture rule
+                    if ball_name == "Friend Ball" and opponent.trust >= 70 and not trainer_name:
+                        print("You toss a Friend Ball...")
+                        player.remove_item("balls", "Friend Ball", 1)
+                        print(f"The Friend Ball glows softly... {opponent.name} steps inside by choice.")
+                        player.add_pokemon(opponent)
+                        return "caught"
+                    else:
+                        success = attempt_catch_with_ball(player, opponent, ball_name)
+                        if success:
+                            print(f"You caught {opponent.name}!")
+                            return "caught"
+                        else:
+                            print(f"{opponent.name} broke free!")
+        elif cmd == "5":
+            if trainer_name:
+                print("You can't run from a trainer battle!")
+            else:
+                if random.random() < 0.7:
+                    print("You ran away safely.")
+                    return "ran"
+                else:
+                    print("Couldn't get away!")
+        else:
+            print("Invalid action.")
+
+        # Opponent turn if still alive
+        if not opponent.is_fainted():
+            move = random.choice(list(opponent.moves.keys()))
+            dmg,eff = opponent.calculate_damage(move, active)
+            active.current_hp = max(0, active.current_hp - dmg)
+            print(f"The {opponent.name} used {move}! {dmg} dmg.")
+            if active.is_fainted():
+                print(f"{active.name} fainted!")
+
+# Bag usage within battle
+def open_bag_in_battle(player: Player, wild: Pokemon):
+    print("\nBag Categories:")
+    categories = ["food","balls","healing","status"]
+    for i,cat in enumerate(categories,1):
+        print(f"{i}. {cat.title()}")
+    choice = input("> ").strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(categories)):
+        print("Cancelled.")
+        return
+    cat = categories[int(choice)-1]
+    items = player.bag.get(cat, {})
+    if not items:
+        print("Nothing in that category.")
+        return
+    item_list = list(items.items())
+    for i,(name,qty) in enumerate(item_list,1):
+        print(f"{i}. {name} x{qty}")
+    sel = input("> ").strip()
+    if not sel.isdigit() or not (1 <= int(sel) <= len(item_list)):
+        print("Cancelled.")
+        return
+    item_name = item_list[int(sel)-1][0]
+    # effects
+    if cat == "food":
+        feed_pokemon_turn(player, wild)
+    elif cat == "balls":
+        print("Use balls via 'Throw Ball' action in battle.")
+    elif cat == "healing":
+        # heal active Pokémon
+        heal_vals = {"Potion":20,"Super Potion":50}
+        if not player.team:
+            print("No Pokémon to heal.")
+            return
+        print("Choose a Pokémon to heal:")
+        for i,p in enumerate(player.team,1):
+            print(f"{i}. {p.name} ({p.current_hp}/{p.max_hp})")
+        c = input("> ").strip()
+        if not c.isdigit() or not (1 <= int(c) <= len(player.team)):
+            print("Cancelled.")
+            return
+        target = player.team[int(c)-1]
+        heal_amount = heal_vals.get(item_name, 0)
+        target.current_hp = min(target.max_hp, target.current_hp + heal_amount)
+        player.remove_item(cat, item_name, 1)
+        print(f"{target.name} healed by {heal_amount} HP.")
+    elif cat == "status":
+        print("Status items are not yet implemented in-battle.")
+
+# ------------------------------
+# Foraging System
+# ------------------------------
+def forage_area(player: Player, area_name: str):
+    area = FORAGE_AREAS.get(area_name)
+    if not area:
+        print("You can't forage here.")
+        return
+    print(f"\n🌲 You begin foraging in the {area_name}...")
+    time.sleep(0.8)
+    roll = random.random()
+    if roll < area["danger"]:
+        print("🐾 Danger! A wild Pokémon ambushes you!")
+        # create wild Pokémon and battle
+        species = random.choice(list(POKEDEX.keys()))
+        info = POKEDEX[species]
+        wild = Pokemon(species, random.randint(2,5), info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+        active = player.choose_active()
+        if active:
+            res = battle_loop(Game.instance, player, active, wild)
+            if res in ("win","caught"):
+                print("You survived the ambush.")
+        else:
+            print("You have no healthy Pokémon to defend you. You run back to town.")
+            return
+    else:
+        # find item
+        loot_roll = random.random()
+        if loot_roll < 0.70:
+            found = random.choice(area["common"])
+        elif loot_roll < 0.95:
+            found = random.choice(area["rare"])
+        else:
+            found = None
+        if found:
+            player.add_item("food", found, 1)
+            print(f"🍎 You found: {found} (added to Food).")
+        else:
+            print("💨 You searched but found nothing.")
+
+# ------------------------------
+# World / Locations
+# ------------------------------
+class Location:
+    def __init__(self, name, desc, conn, events):
+        self.name = name
+        self.desc = desc
+        self.conn = conn  # dict direction->location name
+        self.events = events  # list of event keys
+
+class World:
+    def __init__(self, game):
+        self.game = game
+        self.locations = self.create_locations()
+        self.current = self.locations["Nuvema Outpost"]
+        self.trainers_defeated = set()
+        self.last_town = "Nuvema Outpost"
+
+    def create_locations(self):
+        return {
+            "Nuvema Outpost": Location("Nuvema Outpost", "A battered outpost, the center provides the only steady power.", {"north":"Verdant Trail"}, ["pokecenter","pokemart"]),
+            "Verdant Trail": Location("Verdant Trail", "Overgrown path. Good for foraging.", {"south":"Nuvema Outpost","north":"Ruined Park"}, ["wild_encounter"]),
+            "Ruined Park": Location("Ruined Park", "Rusting rides and broken benches. Strange berries grow here.", {"south":"Verdant Trail","north":"Scorched Forest"}, ["wild_encounter","forage_spot"]),
+            "Scorched Forest": Location("Scorched Forest", "Charred trees and simmering earth.", {"south":"Ruined Park"}, ["wild_encounter"])
+        }
+
+    def describe(self):
+        print(f"\n📍 {self.current.name} — {self.current.desc}")
+        if self.current.conn:
+            print("Paths:")
+            for d,t in self.current.conn.items():
+                print(f"- {d.title()} → {t}")
+
+    def move(self):
+        self.describe()
+        dest = input("> ").strip().lower()
+        if dest in self.current.conn:
+            self.current = self.locations[self.current.conn[dest]]
+            if "pokecenter" in self.current.events or "pokemart" in self.current.events:
+                self.last_town = self.current.name
+            print(f"\n➡️ You travel {dest} to {self.current.name}...")
+            # trigger events (trainers/wild)
+            self.trigger_events_on_entry()
+        else:
+            print("You can't go that way.")
+
+    def trigger_events_on_entry(self):
+        # automatic triggers on entering a new location
+        for e in self.current.events:
+            if e == "wild_encounter":
+                # small chance to encounter on arrival
+                if random.random() < 0.5:
+                    species = random.choice(list(POKEDEX.keys()))
+                    info = POKEDEX[species]
+                    wild = Pokemon(species, random.randint(2,5), info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+                    print(f"🌿 A wild {wild.name} stirs nearby...")
+                    active = self.game.player.choose_active()
+                    if active:
+                        battle_loop(self.game, self.game.player, active, wild)
+            if e == "forage_spot":
+                # offer foraging option when in this area
+                pass
+        # if town (has center or mart) open town menu
+        if any(ev in ("pokecenter","pokemart") for ev in self.current.events):
+            self.town_menu()
+
+    def town_menu(self):
+        while True:
+            print(f"\n🏙 You are in {self.current.name}. What would you like to do?")
+            print("1. Visit PokéCenter  2. Visit PokéMart  3. Forage  4. Open Menu  5. Leave")
+            c = input("> ").strip()
+            if c == "1":
+                self.event("pokecenter")
+            elif c == "2":
+                self.event("pokemart")
+            elif c == "3":
+                # Forage area specific: show available spots based on location
+                area = self.current.name
+                if area in FORAGE_AREAS:
+                    forage_area(self.game.player, area)
+                elif self.current.name == "Ruined Park":
+                    forage_area(self.game.player, "Ruined Park")
+                else:
+                    print("There's nowhere safe to forage here.")
+            elif c == "4":
+                self.game.menu()
+            elif c == "5":
+                print("You step out of town.")
+                break
+            else:
+                print("Invalid choice.")
+
+    def event(self, e):
+        if e == "pokecenter":
+            print("\n🏥 Nurse Joy: '" + random.choice(CENTER_DIALOGUE_ENTER) + "'")
+            print(random.choice(CENTER_DIALOGUE_HEALING))
+            for p in self.game.player.team:
+                p.heal_full()
+            print(random.choice(CENTER_DIALOGUE_DONE))
+        elif e == "pokemart":
+            print("\n🛍️ Clerk: '" + random.choice(MART_DIALOGUE_ENTER) + "'")
+            print(random.choice(MART_DIALOGUE_OFFER))
+            self.pokemart_menu()
+        else:
+            print("Nothing happens.")
+
+    def pokemart_menu(self):
+        while True:
+            print(f"\n💰 Welcome to the PokéMart. You have ${self.game.player.money}.")
+            print("Categories: 1) Balls  2) Food  3) Healing  4) Status  5) Sell Foraged  6) Leave")
+            c = input("> ").strip()
+            cats = {"1":"balls","2":"food","3":"healing","4":"status"}
+            if c in cats:
+                cat = cats[c]
+                items = POKEMART_ITEMS.get(cat, {})
+                if not items:
+                    print("No items in this category.")
+                    continue
+                for i,(name,data) in enumerate(items.items(),1):
+                    print(f"{i}. {name} - ${data['price']}\n   {data['desc']}")
+                sel = input("\nEnter number to buy or Enter to cancel: ").strip()
+                if not sel:
+                    continue
+                if not sel.isdigit() or not (1 <= int(sel) <= len(items)):
+                    print("Invalid.")
+                    continue
+                item_name = list(items.keys())[int(sel)-1]
+                item_data = items[item_name]
+                print(f"Buy {item_name} for ${item_data['price']}? (y/n)")
+                if input("> ").strip().lower() == "y":
+                    if self.game.player.money >= item_data["price"]:
+                        self.game.player.money -= item_data["price"]
+                        self.game.player.add_item(cat, item_name, 1)
+                        print(random.choice(MART_DIALOGUE_BUY))
+                    else:
+                        print("You don't have enough money.")
+            elif c == "5":
+                # sell foraged items (foods) - simple price per item
+                foods = self.game.player.bag.get("food",{})
+                if not foods:
+                    print("You have no foraged food to sell.")
+                    continue
+                print("Your foraged foods:")
+                items = list(foods.items())
+                for i,(name,qty) in enumerate(items,1):
+                    sell_price = 25  # flat for now
+                    print(f"{i}. {name} x{qty} (Sell for ${sell_price} each)")
+                sel = input("Enter number to sell one (or Enter to cancel): ").strip()
+                if not sel:
+                    continue
+                if not sel.isdigit() or not (1 <= int(sel) <= len(items)):
+                    print("Invalid.")
+                    continue
+                item_name = items[int(sel)-1][0]
+                if self.game.player.remove_item("food", item_name, 1):
+                    self.game.player.money += 25
+                    print(f"Sold one {item_name} for $25.")
+            elif c == "6":
+                print("🛒 Clerk: 'Come back anytime.'")
+                break
+            else:
+                print("Invalid.")
+
+# ------------------------------
+# Game Class
+# ------------------------------
+class Game:
+    instance = None
+    def __init__(self):
+        Game.instance = self
+        self.player = None
+        self.world = None
+        self.browser_mode = False
+
+    def title_screen(self):
+        print("="*40)
+        print("🌑 POKE ENGINE THING — TEST BUILD 🌑")
+        print("⚠️ DOES NOT REFLECT HOW GAME WILL ACTUALLY PLAY UWU ⚠️")
+        print("v1.4 — Friends & Foes Update")
+        print("="*40)
+        time.sleep(0.6)
+
+    def start(self):
+        self.title_screen()
+        print("Choose save type:")
+        print("1. Browser memory (for web runners)")
+        print("2. Local file (save.json)")
+        self.browser_mode = (input("> ").strip() == "1")
+        while True:
+            print("\nMain Menu: 1) New Game  2) Load Game  3) Quit")
+            c = input("> ").strip()
+            if c == "1":
+                self.new_game()
+                break
+            elif c == "2":
+                if self.load_game():
+                    break
+            elif c == "3":
+                print("Goodbye.")
+                return
+            else:
+                print("Invalid.")
+
+    def new_game(self):
+        name = input("Enter your name: ").strip() or "Trainer"
+        self.player = Player(name)
+        print("\nYou wake in a dim Pokémon Center. A faint alarm hums in the background.")
+        print("Nurse Joy approaches you, eyes tired but relieved.")
+        print("\"You're awake... the lab incident— many didn't make it. Three survivors were in the containment room.\"")
+        print("\"Choose one of the survivors. They need someone.\"")
+        # starter selection
+        keys = list(STARTERS.keys())
+        for i,k in enumerate(keys,1):
+            print(f"{i}. {k} ({STARTERS[k]['type']}) - {STARTERS[k]['desc']}")
+        while True:
+            sel = input("> ").strip()
+            if sel.isdigit() and 1 <= int(sel) <= len(keys):
+                starter_name = keys[int(sel)-1]
+                info = POKEDEX.get(starter_name)
+                if not info:
+                    info = POKEDEX[starter_name] if starter_name in POKEDEX else None
+                p = Pokemon(starter_name, 5, POKEDEX[starter_name]["base_hp"], POKEDEX[starter_name]["base_atk"], POKEDEX[starter_name]["base_def"], POKEDEX[starter_name]["moves"], POKEDEX[starter_name]["type"])
+                self.player.add_pokemon(p)
+                print(f"\nYou cradle the Poké Ball. {starter_name} eyes you warily, then steps forward.")
+                break
+            else:
+                print("Choose quickly, there's little time.")
+        # initial player state
+        self.world = World(self)
+        self.player.last_town = self.world.current.name
+        print(f"\nNurse Joy: 'Take care. There's little left of the world we knew.'")
+        # enter town menu
+        self.world.town_menu()
+        # after initial setup, enter main loop
+        self.main_loop()
+
+    def main_loop(self):
+        while True:
+            print("\nWhat will you do next?")
+            print("1. Move  2. Team  3. Bag  4. Forage nearby  5. Save  6. Load  7. Quit")
+            c = input("> ").strip()
+            if c == "1":
+                self.world.move()
+            elif c == "2":
+                self.player.show_team()
+            elif c == "3":
+                self.open_bag_menu()
+            elif c == "4":
+                # forage in current area if available
+                area = self.world.current.name
+                if area in FORAGE_AREAS:
+                    forage_area(self.player, area)
+                else:
+                    print("There's nowhere safe to forage here.")
+            elif c == "5":
+                self.save_game()
+            elif c == "6":
+                self.load_game()
+            elif c == "7":
+                print("Goodbye.")
+                break
+            else:
+                print("Invalid.")
+
+    def open_bag_menu(self):
+        while True:
+            print("\n=== BAG ===")
+            print(f"Money: ${self.player.money}")
+            cats = ["food","balls","healing","status","back"]
+            for i,cat in enumerate(cats,1):
+                if cat=="back":
+                    print(f"{i}. Back")
+                else:
+                    items = self.player.bag.get(cat,{})
+                    print(f"{i}. {cat.title()} ({sum(items.values())} items)")
+            c = input("> ").strip()
+            if not c.isdigit() or not (1 <= int(c) <= len(cats)):
+                print("Invalid.")
+                continue
+            idx = int(c)-1
+            if cats[idx] == "back":
+                break
+            cat = cats[idx]
+            items = self.player.bag.get(cat,{})
+            if not items:
+                print("No items in this category.")
+                continue
+            item_list = list(items.items())
+            for i,(name,qty) in enumerate(item_list,1):
+                # attempt to show mart descriptions if available
+                desc = None
+                for mcat in POKEMART_ITEMS:
+                    if name in POKEMART_ITEMS[mcat]:
+                        desc = POKEMART_ITEMS[mcat][name]["desc"]
+                print(f"{i}. {name} x{qty} - {desc if desc else ''}")
+            print(f"{len(item_list)+1}. Back")
+            sel = input("> ").strip()
+            if not sel.isdigit():
+                continue
+            sel = int(sel)
+            if sel == len(item_list)+1:
+                continue
+            if not (1 <= sel <= len(item_list)):
+                continue
+            item_name = item_list[sel-1][0]
+            # use item
+            if cat == "food":
+                print("You can feed Pokémon from the Team menu or during battle.")
+            elif cat == "balls":
+                print("Balls are used in battle to capture Pokémon.")
+            elif cat == "healing":
+                # heal a team member
+                heal_vals = {"Potion":20,"Super Potion":50}
+                print("Choose a Pokémon to heal:")
+                for i,p in enumerate(self.player.team,1):
+                    print(f"{i}. {p.name} ({p.current_hp}/{p.max_hp})")
+                ch = input("> ").strip()
+                if not ch.isdigit() or not (1 <= int(ch) <= len(self.player.team)):
+                    print("Cancelled.")
+                    continue
+                target = self.player.team[int(ch)-1]
+                heal_amt = heal_vals.get(item_name, 0)
+                target.current_hp = min(target.max_hp, target.current_hp + heal_amt)
+                self.player.remove_item(cat, item_name, 1)
+                print(f"{target.name} healed {heal_amt} HP.")
+            elif cat == "status":
+                print("Status items not implemented in menu use yet.")
+
+    def respawn_player(self):
+        town = self.player.last_town or self.world.last_town
+        print(f"\nYou awaken safely back in {town}'s Pokémon Center.")
+        # move player there
+        if town in self.world.locations:
+            self.world.current = self.world.locations[town]
+        else:
+            self.world.current = self.world.locations[self.world.last_town]
+        for p in self.player.team:
+            p.heal_full()
+        # return to town menu
+        self.world.town_menu()
+
+    # ---------- Save / Load ----------
+    def save_game(self):
+        data = {"player": self.player.to_dict(), "location": self.world.current.name, "trainers_defeated": list(self.world.trainers_defeated)}
+        if self.browser_mode:
+            global BROWSER_SAVE
+            BROWSER_SAVE = json.dumps(data)
+            print("💾 Game saved to browser memory (temporary).")
+        else:
+            with open(SAVE_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"💾 Game saved to {SAVE_FILE}.")
+
+    def load_game(self):
+        global BROWSER_SAVE
+        data = None
+        if self.browser_mode:
+            if not BROWSER_SAVE:
+                print("No browser save found.")
+                return False
+            data = json.loads(BROWSER_SAVE)
+        else:
+            if not os.path.exists(SAVE_FILE):
+                print("No save file found.")
+                return False
+            with open(SAVE_FILE, "r") as f:
+                data = json.load(f)
+        self.player = Player.from_dict(data["player"])
+        self.world = World(self)
+        self.world.current = self.world.locations.get(data.get("location", "Nuvema Outpost"), self.world.current)
+        self.world.trainers_defeated = set(data.get("trainers_defeated", []))
+        print("✅ Game loaded.")
+        # after loading, go to town menu if in town
+        if any(ev in ("pokecenter","pokemart") for ev in self.world.current.events):
+            self.world.town_menu()
+        else:
+            self.main_loop()
+        return True
+
+# ------------------------------
+# Run
+# ------------------------------
+if __name__ == "__main__":
+    game = Game()
+    game.start()
