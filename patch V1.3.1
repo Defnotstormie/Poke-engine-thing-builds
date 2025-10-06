@@ -1,0 +1,268 @@
+import json, os, random, time
+
+# ===========================================
+#  UNOVA POKEDEX (simplified demo list)
+# ===========================================
+UNOVA_NAMES = [
+    "Snivy","Tepig","Oshawott","Lillipup","Patrat","Purrloin","Pidove",
+    "Blitzle","Sandile","Drilbur","Audino","Timburr","Roggenrola","Woobat",
+    "Sewaddle","Venipede","Cottonee","Petilil","Basculin","Darumaka"
+]
+TYPE_POOL = ["Grass","Fire","Water","Normal","Dark","Flying","Ground","Rock","Psychic","Bug","Fighting"]
+TYPE_SIGNATURE_MOVE = {
+    "Fire":"Ember","Water":"Water Gun","Grass":"Vine Whip","Electric":"Spark",
+    "Ground":"Mud-Slap","Rock":"Rock Throw","Flying":"Gust","Psychic":"Confusion",
+    "Dark":"Bite","Bug":"Bug Bite","Fighting":"Low Kick","Normal":"Quick Attack"
+}
+def _generate_stats(i): hp=20+(i%10); atk=8+(i%7); dfs=7+(i%5); return hp,atk,dfs
+UNOVA_POKEDEX={}
+for i,name in enumerate(UNOVA_NAMES):
+    t=TYPE_POOL[i%len(TYPE_POOL)]; sig=TYPE_SIGNATURE_MOVE.get(t,"Tackle")
+    moves={"Tackle":{"power":5,"type":"Normal"},sig:{"power":6+(i%3),"type":t}}
+    hp,atk,dfs=_generate_stats(i)
+    UNOVA_POKEDEX[name]={"base_hp":hp,"base_attack":atk,"base_defense":dfs,"type":t,"moves":moves}
+
+SAVE_FILE="save.json"
+BROWSER_SAVE=None
+TYPE_EFFECTIVENESS={
+    "Fire":{"Grass":2,"Water":0.5,"Fire":0.5},
+    "Water":{"Fire":2,"Grass":0.5,"Water":0.5},
+    "Grass":{"Water":2,"Fire":0.5,"Grass":0.5},
+    "Electric":{"Water":2,"Grass":0.5,"Electric":0.5},
+    "Normal":{}
+}
+
+# ---------- Pokémon ----------
+class Pokemon:
+    def __init__(self,name,level,hp,atk,dfs,moves,ptype):
+        self.name=name; self.level=level
+        self.hp=hp+level*2; self.attack=atk+level; self.defense=dfs+level
+        self.current_hp=self.hp; self.moves=moves; self.type=ptype
+    def is_fainted(self): return self.current_hp<=0
+    def heal_full(self): self.current_hp=self.hp
+    def calculate_damage(self,move,target):
+        m=self.moves[move]; dmg=m["power"]+self.attack-target.defense
+        eff=TYPE_EFFECTIVENESS.get(m["type"],{}).get(target.type,1)
+        return max(1,int(dmg*eff)),eff
+    def gain_exp(self,exp): self.level+=1; self.hp+=2; self.attack+=1; self.defense+=1; print(f"✨ {self.name} grew to Lv.{self.level}!")
+
+# ---------- Player ----------
+class Player:
+    def __init__(self,name):
+        self.name=name; starter=random.choice(["Snivy","Tepig","Oshawott"])
+        d=UNOVA_POKEDEX[starter]
+        self.team=[Pokemon(starter,5,d["base_hp"],d["base_attack"],d["base_defense"],d["moves"],d["type"])]
+        self.items={"Potion":2,"Pokéball":3}; self.money=50
+    def choose_pokemon(self):
+        alive=[p for p in self.team if not p.is_fainted()]
+        if not alive:
+            print("All your Pokémon have fainted!")
+            return None
+        print("\nChoose a Pokémon:")
+        for i,p in enumerate(alive,1):
+            print(f"{i}. {p.name} Lv{p.level} ({p.current_hp}/{p.hp} HP)")
+        c=int(input("> "))-1
+        return alive[c]
+    def show_team(self):
+        print("\n=== Your Pokémon ===")
+        for p in self.team:
+            print(f"{p.name} Lv{p.level} | HP {p.current_hp}/{p.hp}")
+    def add_money(self,amt): self.money+=amt; print(f"💰 You got ${amt}! (Total: ${self.money})")
+    def spend_money(self,amt):
+        if self.money>=amt: self.money-=amt; return True
+        print("💸 Not enough PokéDollars!"); return False
+    def all_fainted(self): return all(p.is_fainted() for p in self.team)
+    def to_dict(self):
+        return {"name":self.name,"money":self.money,"items":self.items,
+                "team":[{"name":p.name,"level":p.level,"hp":p.hp,"current_hp":p.current_hp,
+                         "attack":p.attack,"defense":p.defense,"moves":p.moves,"type":p.type}
+                        for p in self.team]}
+
+# ---------- Battle ----------
+class Battle:
+    def __init__(self,game,player,ally,enemy,trainer=None):
+        self.game=game; self.p=player; self.a=ally; self.b=enemy; self.trainer=trainer
+    def run(self):
+        foe_name=self.b.name
+        print(f"\n⚔️ {'Trainer '+self.trainer if self.trainer else 'Wild '+foe_name} appeared!")
+        if self.trainer:
+            print(f"👤 {self.trainer}: 'Let's see what you've got!'")
+        while not self.a.is_fainted() and not self.b.is_fainted():
+            print(f"\n{self.a.name} HP:{self.a.current_hp}/{self.a.hp} | {self.b.name} HP:{self.b.current_hp}/{self.b.hp}")
+            print("Moves:",", ".join(self.a.moves.keys()))
+            move=input("Use which move? > ").title()
+            if move not in self.a.moves: print("❌ Invalid move."); continue
+            dmg,eff=self.a.calculate_damage(move,self.b)
+            self.b.current_hp-=dmg
+            msg="Super effective!" if eff>1 else "Not very effective..." if eff<1 else ""
+            print(f"{self.a.name} used {move}! {dmg} dmg. {msg}")
+            if self.b.is_fainted():
+                print(f"💥 {self.b.name} fainted!")
+                self.a.gain_exp(10)
+                reward=25 if self.trainer else 5
+                self.p.add_money(reward)
+                if self.trainer: print(f"🏆 You defeated Trainer {self.trainer}!")
+                return
+            foe_move=random.choice(list(self.b.moves.keys()))
+            dmg,eff=self.b.calculate_damage(foe_move,self.a)
+            self.a.current_hp-=dmg
+            print(f"The foe {self.b.name} used {foe_move}! {dmg} dmg.")
+            if self.a.is_fainted():
+                print(f"{self.a.name} fainted!")
+                if self.p.all_fainted():
+                    print("\n💫 You run back to the Pokémon Center, your Pokéballs clutched tightly in your hands...")
+                    self.game.respawn_player(); return
+                else:
+                    self.a=self.p.choose_pokemon()
+                    if not self.a:
+                        print("\n💫 You run back to the Pokémon Center, your Pokéballs clutched tightly in your hands...")
+                        self.game.respawn_player(); return
+
+# ---------- World ----------
+class Location:
+    def __init__(self,name,desc,conn,events): self.name=name; self.desc=desc; self.conn=conn; self.events=events
+
+class World:
+    def __init__(self,game):
+        self.game=game; self.locations=self.create()
+        self.current=self.locations["Nuvema Town"]; self.last_town="Nuvema Town"
+        self.trainers_defeated=set()
+    def create(self):
+        return {
+            "Nuvema Town":Location("Nuvema Town","Your cozy hometown by the sea.",{"north":"Route 1"},["pokecenter","pokemart"]),
+            "Route 1":Location("Route 1","A quiet path filled with tall grass.",{"south":"Nuvema Town","north":"Accumula Town"},["wild_encounter","trainer_Youngster Joey"]),
+            "Accumula Town":Location("Accumula Town","A peaceful little place.",{"south":"Route 1"},["pokecenter","pokemart","trainer_Bianca"])
+        }
+    def move(self):
+        print(f"\n📍 You’re in {self.current.name}. {self.current.desc}")
+        print("Where do you want to go?")
+        for d,t in self.current.conn.items(): print(f"- {d.title()} → {t}")
+        c=input("> ").lower()
+        if c in self.current.conn:
+            self.current=self.locations[self.current.conn[c]]
+            if any(e in ("pokecenter","pokemart") for e in self.current.events):
+                self.last_town=self.current.name
+            print(f"\n➡️ You head {c} towards {self.current.name}...")
+            self.trigger_location_events()
+        else: print("❌ You can’t go that way.")
+    def town_menu(self):
+        while True:
+            print(f"\n🏙️ You are in {self.current.name}. What would you like to do?")
+            print("1. Explore town\n2. Open menu\n3. Move on\n4. Exit game")
+            c=input("> ").strip()
+            if c=="1": self.explore_town()
+            elif c=="2": self.game.menu()
+            elif c=="3": self.move(); break
+            elif c=="4": print("👋 Goodbye!"); exit()
+            else: print("Invalid choice.")
+    def explore_town(self):
+        found=False
+        for e in self.current.events:
+            if e in ("pokecenter","pokemart"):
+                self.event(e); found=True
+        if not found: print("There’s nothing special here.")
+    def trigger_location_events(self):
+        for e in self.current.events:
+            if e.startswith("trainer_") or e=="wild_encounter":
+                self.event(e)
+        if any(e in ("pokecenter","pokemart") for e in self.current.events):
+            self.town_menu()
+    def event(self,e):
+        if e=="wild_encounter":
+            name=random.choice(list(UNOVA_POKEDEX.keys()))
+            d=UNOVA_POKEDEX[name]
+            foe=Pokemon(name,random.randint(3,8),d["base_hp"],d["base_attack"],d["base_defense"],d["moves"],d["type"])
+            your=self.game.player.choose_pokemon()
+            if your: Battle(self.game,self.game.player,your,foe).run()
+        elif e.startswith("trainer_"):
+            tname=e.split("_")[1]
+            if tname in self.trainers_defeated: return
+            print(f"👀 Trainer {tname}: 'Hey! Our eyes met, that means battle!'")
+            pname=random.choice(list(UNOVA_POKEDEX.keys()))
+            d=UNOVA_POKEDEX[pname]
+            enemy=Pokemon(pname,random.randint(4,7),d["base_hp"],d["base_attack"],d["base_defense"],d["moves"],d["type"])
+            your=self.game.player.choose_pokemon()
+            if your: Battle(self.game,self.game.player,your,enemy,trainer=tname).run()
+            self.trainers_defeated.add(tname)
+        elif e=="pokecenter":
+            print("\n🏥 Nurse Joy: 'Welcome to the Pokémon Center! Let me heal your team in a jiffy!'")
+            for p in self.game.player.team: p.heal_full()
+            print("✨ Your Pokémon are fighting fit again!")
+        elif e=="pokemart":
+            print("\n🛍️ Clerk: 'Hi there! We’ve got the best prices in town!'")
+            while True:
+                print(f"Money: ${self.game.player.money}\n1. Potion ($10)\n2. Pokéball ($15)\n3. Leave")
+                c=input("> ")
+                if c=="1" and self.game.player.spend_money(10): self.game.player.items["Potion"]+=1; print("🧴 Bought a Potion!")
+                elif c=="2" and self.game.player.spend_money(15): self.game.player.items["Pokéball"]+=1; print("⚪ Bought a Pokéball!")
+                elif c=="3": print("🛒 Clerk: 'Come back anytime!'"); break
+                else: print("Invalid.")
+
+# ---------- Game ----------
+class Game:
+    def __init__(self): self.player=None; self.world=None; self.browser_mode=False
+    def start(self):
+        print(" POKE ENGINE THING TEST BUILD ")
+        print("⚠️ DOES NOT REFLECT HOW GAME WILL ACTUALLY PLAY UWU ⚠️")
+        print("\nPatch v1.3.1 — polished and charming \n")
+        time.sleep(1)
+        print("Choose save type:\n1. Browser memory\n2. Local file")
+        self.browser_mode=(input("> ")=="1")
+        while True:
+            print("\nMain Menu:\n1. New Game\n2. Load Game\n3. Quit")
+            c=input("> ")
+            if c=="1":
+                n=input("Enter your name: ")
+                self.player=Player(n); self.world=World(self)
+                print(f"\n🎉 Welcome, {n}!\nYour adventure begins in {self.world.current.name}!")
+                self.world.trigger_location_events(); self.menu(); break
+            elif c=="2":
+                if self.load(): self.menu(); break
+                else: print("No save found.")
+            elif c=="3": print("Goodbye!"); break
+            else: print("Invalid.")
+    def respawn_player(self):
+        town_name=self.world.last_town
+        print(f"\n🚶 You hurry back to {town_name}'s Pokémon Center...")
+        for p in self.player.team: p.heal_full()
+        self.world.current=self.world.locations[town_name]
+        print("💖 Your Pokémon are healed and ready again.")
+        self.world.town_menu()
+    def menu(self):
+        while True:
+            print("\n=== Main Menu ===\n1. Explore\n2. Team\n3. Bag\n4. Save\n5. Load\n6. Quit")
+            c=input("> ")
+            if c=="1": self.world.move()
+            elif c=="2": self.player.show_team()
+            elif c=="3": print(self.player.items,self.player.money)
+            elif c=="4": self.save()
+            elif c=="5": self.load()
+            elif c=="6": print("👋 Goodbye!"); break
+            else: print("Invalid.")
+    def save(self):
+        data={"player":self.player.to_dict(),"location":self.world.current.name,
+               "last_town":self.world.last_town,"trainers_defeated":list(self.world.trainers_defeated)}
+        if self.browser_mode:
+            global BROWSER_SAVE; BROWSER_SAVE=json.dumps(data); print("💾 Saved to browser memory.")
+        else:
+            json.dump(data,open(SAVE_FILE,"w"),indent=4); print("💾 Saved to save.json.")
+    def load(self):
+        global BROWSER_SAVE; data=None
+        if self.browser_mode:
+            if not BROWSER_SAVE: print("No browser save."); return False
+            data=json.loads(BROWSER_SAVE)
+        else:
+            if not os.path.exists(SAVE_FILE): print("No save file."); return False
+            data=json.load(open(SAVE_FILE))
+        self.player=Player(data["player"]["name"]); self.player.money=data["player"]["money"]; self.player.items=data["player"]["items"]
+        self.player.team=[]
+        for p in data["player"]["team"]:
+            poke=Pokemon(p["name"],p["level"],p["hp"],p["attack"],p["defense"],p["moves"],p["type"]); poke.current_hp=p["current_hp"]
+            self.player.team.append(poke)
+        self.world=World(self); self.world.trainers_defeated=set(data.get("trainers_defeated",[]))
+        self.world.current=self.world.locations.get(data["location"],self.world.locations["Nuvema Town"])
+        self.world.last_town=data.get("last_town","Nuvema Town")
+        print(f"✅ Loaded! You’re in {self.world.current.name}."); return True
+
+if __name__=="__main__":
+    Game().start()
