@@ -1,0 +1,2833 @@
+# ==========================================
+# 🌑 POKE ENGINE THING 
+#    v1.6 — "storytime"
+#    
+#    TEST BUILD DOES NOT REFLECT HOW GAME WILL ACTUALLY PLAY (UWU)
+# ==========================================
+
+import json, os, random, time, datetime
+
+# ------------------------------
+# Config / Globals
+# ------------------------------
+SAVE_FILE = "save.json"
+BROWSER_SAVE = None
+TRUST_THRESHOLD = 70  # trust required for "forced befriending" state
+DEV_FORCED_NIGHT = None  # None = use real time; True = force night; False = force day
+
+# Story flags (persisted in save)
+story_flags = {
+    "intro_scene_complete": False,
+    "next_objective": None,
+    "met_elara_in_person": False,
+    "received_friend_balls": False,
+    "friend_tutorial_started": False,
+    "friend_tutorial_complete": False,
+    # route3 flags
+    "quest_route3_started": False,
+    "marshal_met_route3": False,
+    "sylveon_scene_seen": False,
+    "quest_route3_progress": None,
+    "route3_note_taken": False,
+    # striaton flags
+    "striaton_unlocked": False,
+    "striaton_arrived": False,
+    "striaton_gym_cleared": False
+}
+
+# Journal (list of entries)
+JOURNAL = []
+
+# ------------------------------
+# Helpers
+# ------------------------------
+def is_night():
+    global DEV_FORCED_NIGHT
+    if DEV_FORCED_NIGHT is True:
+        return True
+    if DEV_FORCED_NIGHT is False:
+        return False
+    now = datetime.datetime.now().hour
+    return now >= 20 or now <= 5
+
+def plural(n, s):
+    return f"{n} {s}" if n == 1 else f"{n} {s}s"
+
+def add_journal(entry):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    JOURNAL.append(f"[{timestamp}] {entry}")
+
+# ------------------------------
+# Type / Pokedex (trimmed, functional)
+# ------------------------------
+TYPE_POOL = ["Normal","Fire","Water","Grass","Electric","Rock","Ground","Flying","Psychic","Dark","Ghost","Ice","Steel","Poison","Fighting","Bug","Fairy","Dragon"]
+
+def deterministic_type(name):
+    h = sum(ord(c) for c in name)
+    return TYPE_POOL[h % len(TYPE_POOL)]
+
+POKEDEX = {
+    "Snivy": {"type":"Grass","base_hp":24,"base_atk":9,"base_def":8,"moves":{"Tackle":{"power":5,"type":"Normal"},"Vine Whip":{"power":7,"type":"Grass"}}},
+    "Tepig": {"type":"Fire","base_hp":26,"base_atk":10,"base_def":8,"moves":{"Tackle":{"power":5,"type":"Normal"},"Ember":{"power":7,"type":"Fire"}}},
+    "Oshawott": {"type":"Water","base_hp":25,"base_atk":9,"base_def":9,"moves":{"Tackle":{"power":5,"type":"Normal"},"Water Gun":{"power":7,"type":"Water"}}},
+    "Patrat": {"type":"Normal","base_hp":22,"base_atk":8,"base_def":7,"moves":{"Tackle":{"power":5,"type":"Normal"},"Bite":{"power":8,"type":"Dark"}}},
+    "Pidove": {"type":"Normal","base_hp":20,"base_atk":7,"base_def":6,"moves":{"Tackle":{"power":5,"type":"Normal"},"Gust":{"power":7,"type":"Flying"}}},
+    "Eevee": {"type":"Normal","base_hp":20,"base_atk":8,"base_def":7,"moves":{"Tackle":{"power":5,"type":"Normal"},"Growl":{"power":0,"type":"Normal"}}},
+    "Sylveon_Corrupted": {"type":"Fairy","base_hp":34,"base_atk":15,"base_def":12,"moves":{"Strange Tendril":{"power":10,"type":"Fairy"},"Howl of Loss":{"power":12,"type":"Dark"}}},
+    # Striaton Gym Pokémon (simplified)
+    "Pansage": {"type":"Grass","base_hp":22,"base_atk":9,"base_def":8,"moves":{"Tackle":{"power":5,"type":"Normal"},"Leafage":{"power":8,"type":"Grass"}}},
+    "Simisage": {"type":"Grass","base_hp":30,"base_atk":13,"base_def":10,"moves":{"Leaf Blade":{"power":12,"type":"Grass"},"Bite":{"power":9,"type":"Dark"}}},
+    "Leavanny": {"type":"Bug","base_hp":28,"base_atk":11,"base_def":11,"moves":{"Razor Leaf":{"power":10,"type":"Grass"},"String Shot":{"power":0,"type":"Bug"}}},
+    "Pansear": {"type":"Fire","base_hp":22,"base_atk":9,"base_def":8,"moves":{"Tackle":{"power":5,"type":"Normal"},"Ember":{"power":7,"type":"Fire"}}},
+    "Simisear": {"type":"Fire","base_hp":30,"base_atk":13,"base_def":10,"moves":{"Fire Punch":{"power":12,"type":"Fire"},"Flame Burst":{"power":10,"type":"Fire"}}},
+    "Darmanitan": {"type":"Fire","base_hp":40,"base_atk":16,"base_def":12,"moves":{"Flare Blitz":{"power":16,"type":"Fire"},"Tackle":{"power":6,"type":"Normal"}}}
+}
+POKEDEX_KEYS = list(POKEDEX.keys())
+
+# ------------------------------
+# Type effectiveness (simple)
+# ------------------------------
+TYPE_EFFECTIVENESS = {
+    "Fire": {"Grass": 2, "Water": 0.5, "Fire": 0.5},
+    "Water": {"Fire": 2, "Grass": 0.5, "Water": 0.5},
+    "Grass": {"Water": 2, "Fire": 0.5, "Grass": 0.5},
+    "Electric": {"Water": 2},
+    "Psychic": {"Dark": 0},
+    "Dark": {"Psychic": 2},
+    "Normal": {}
+}
+
+# ------------------------------
+# Items & shop
+# ------------------------------
+ITEMS = {
+    "Pokeball": {"category":"balls","price":200,"desc":"A standard Poké Ball.","lore":"Catches, contains, comforts."},
+    "Friend Ball": {"category":"balls","price":800,"desc":"Works best on Pokémon that already trust you.","lore":"A gentle capture that asks for consent."},
+    "Ritual Ball": {"category":"balls","price":8000,"desc":"Ceremonial ball for corrupted Pokémon.","lore":"Hums when corruption is near."},
+    "Soft Fruit": {"category":"food","price":40,"desc":"Gentle fruit. Calms many Pokémon.","lore":"A small kindness."},
+    "Spicy Berry": {"category":"food","price":50,"desc":"Favored by Fire-types.","lore":"It burns gently."},
+    "Potion": {"category":"healing","price":300,"desc":"Restores 20 HP.","lore":"Basic medicine."},
+    "Dark Energy Stone": {"category":"stones","price":5000,"desc":"Scarred shard radiating cold void.","lore":"Whispers in the dark."},
+    "Trio Badge": {"category":"badges","price":0,"desc":"A cracked badge once shared by the Striaton trio.","lore":"A reminder of what was lost."}
+}
+POKEMART_ITEMS = {"balls":{}, "food":{}, "healing":{}, "status":{}, "stones":{}, "badges":{}}
+for name,data in ITEMS.items():
+    cat = data["category"]
+    if cat in POKEMART_ITEMS:
+        POKEMART_ITEMS[cat][name] = {"price": data["price"], "desc": data["desc"], "lore": data["lore"]}
+
+# ------------------------------
+# Forage
+# ------------------------------
+FORAGE_AREAS = {"Verdant Trail":{"common":["Soft Fruit"],"rare":["Dark Energy Stone"],"danger":0.25}}
+
+# ------------------------------
+# Dialogues
+# ------------------------------
+CENTER_DIALOGUE_ENTER = ["Welcome... you look exhausted. Let's get your Pokémon patched up."]
+MART_DIALOGUE_ENTER = ["Welcome to the PokéMart. Don't mind the boarded windows."]
+NPC_DIALOGUE = ["They took the research and left the monsters."]
+
+# ------------------------------
+# Core classes
+# ------------------------------
+class Pokemon:
+    def __init__(self, name, level, base_hp, base_atk, base_def, moves, ptype):
+        self.name = name
+        self.level = int(level)
+        self.max_hp = int(base_hp) + self.level * 2
+        self.attack = int(base_atk) + self.level
+        self.defense = int(base_def) + self.level
+        self.current_hp = self.max_hp
+        self.moves = moves.copy()
+        self.type = ptype
+        self.trust = 0
+    def is_fainted(self):
+        return self.current_hp <= 0
+    def heal_full(self):
+        self.current_hp = self.max_hp
+    def calculate_damage(self, move, target):
+        data = self.moves.get(move)
+        if not data:
+            return 1, 1
+        base = data["power"] + self.attack - target.defense
+        eff = TYPE_EFFECTIVENESS.get(data["type"], {}).get(target.type, 1)
+        dmg = max(1, int(base * eff))
+        return dmg, eff
+    def gain_level(self):
+        self.level += 1
+        self.max_hp += 2
+        self.attack += 1
+        self.defense += 1
+        self.current_hp = self.max_hp
+
+class Player:
+    def __init__(self, name):
+        self.name = name
+        self.team = []
+        self.bag = {"food":{"Soft Fruit":2},"balls":{"Pokeball":5,"Friend Ball":1},"healing":{"Potion":2},"status":{},"stones":{},"badges":{}}
+        self.money = 300
+        self.box = []
+        self.last_town = "Nuvema Outpost"
+        self.reputation = {"solace":0,"dominion":0}
+    def add_pokemon(self, pkmn):
+        if len(self.team) < 6:
+            self.team.append(pkmn)
+            print(f"🎉 {pkmn.name} joined your team!")
+        else:
+            self.box.append({"name": pkmn.name, "level": pkmn.level})
+            print(f"Your team is full. {pkmn.name} sent to PC box.")
+    def choose_active(self):
+        healthy = [p for p in self.team if not p.is_fainted()]
+        if not healthy:
+            return None
+        print("\nChoose your active Pokémon:")
+        for i,p in enumerate(healthy,1):
+            print(f"{i}. {p.name} Lv{p.level} ({p.current_hp}/{p.max_hp}) Trust:{p.trust}")
+        while True:
+            c = input("> ").strip()
+            if c == "sv_dev":
+                return "sv_dev"
+            if c.isdigit() and 1 <= int(c) <= len(healthy):
+                return healthy[int(c)-1]
+            print("Invalid selection.")
+    def show_team(self):
+        print("\n=== Your Team ===")
+        if not self.team:
+            print("(No Pokémon)")
+            return
+        for p in self.team:
+            status = " (FNT)" if p.is_fainted() else ""
+            print(f"- {p.name} Lv{p.level} HP {p.current_hp}/{p.max_hp}{status} Trust:{p.trust}")
+    def has_item(self, category, item):
+        return self.bag.get(category,{}).get(item,0) > 0
+    def remove_item(self, category, item, qty=1):
+        if self.has_item(category,item):
+            self.bag[category][item] -= qty
+            if self.bag[category][item] <= 0:
+                del self.bag[category][item]
+            return True
+        return False
+    def add_item(self, category, item, qty=1):
+        self.bag.setdefault(category,{})
+        self.bag[category][item] = self.bag[category].get(item,0) + qty
+    def all_fainted(self):
+        return len(self.team)>0 and all(p.is_fainted() for p in self.team)
+    def to_dict(self):
+        return {"name":self.name,"money":self.money,"bag":self.bag,"team":[{"name":p.name,"level":p.level,"current_hp":p.current_hp,"trust":p.trust} for p in self.team],"box":self.box,"last_town":self.last_town,"reputation":self.reputation}
+    @classmethod
+    def from_dict(cls,data):
+        pl = cls(data.get("name","Trainer"))
+        pl.money = data.get("money",0)
+        pl.bag = data.get("bag",{"food":{},"balls":{},"healing":{},"status":{},"stones":{},"badges":{}})
+        pl.box = data.get("box",[])
+        pl.last_town = data.get("last_town","Nuvema Outpost")
+        pl.reputation = data.get("reputation",{"solace":0,"dominion":0})
+        pl.team = []
+        for td in data.get("team",[]):
+            name = td.get("name")
+            info = POKEDEX.get(name)
+            if info:
+                p = Pokemon(name, td.get("level",5), info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+                p.current_hp = td.get("current_hp", p.max_hp)
+                p.trust = td.get("trust",0)
+                pl.team.append(p)
+        return pl
+
+# ------------------------------
+# Capture & feeding logic (simplified)
+# ------------------------------
+def attempt_catch_with_ball(player: Player, wild: Pokemon, ball_name: str, forced_befriend=False):
+    if forced_befriend:
+        if ball_name != "Friend Ball":
+            print("This Pokémon doesn’t want to be captured by force. Try a Friend Ball instead.")
+            return False, False, None
+        if not player.remove_item("balls", ball_name, 1):
+            print("You don't have that ball.")
+            return False, False, None
+        print("You gently toss the Friend Ball...")
+        print(f"{wild.name} touches it softly — and vanishes inside without resistance.")
+        player.add_pokemon(wild)
+        player.reputation["solace"] += 1
+        return True, True, "friend"
+    # Corrupted-Sylveon special: balls bounce off
+    if "Corrupted" in wild.name or wild.name.endswith("_Corrupted") or wild.name.endswith("Corrupted") or wild.name == "Sylveon_Corrupted":
+        if ball_name != "Ritual Ball":
+            print("The Pokéball fails — it bounces off the strange aura. Ordinary balls won't hold this creature.")
+            return False, False, None
+        # Ritual Ball attempt
+        if not player.remove_item("balls", ball_name, 1):
+            print("You don't have that ball.")
+            return False, False, None
+        chance = 0.60
+        roll = random.random()
+        print(f"(Ritual catch roll: {roll:.2f} <= {chance:.2f})")
+        if roll <= chance:
+            print(f"You captured the corrupted {wild.name} with the Ritual Ball!")
+            player.add_pokemon(wild)
+            player.reputation["dominion"] += 1
+            return True, True, "ritual"
+        else:
+            print("The Ritual Ball failed... the corruption recoils.")
+            wild.trust = max(0, wild.trust - 5)
+            return True, False, None
+
+    base = max(0.01, (1 - wild.current_hp / wild.max_hp) * 0.6)
+    trust_factor = min(0.5, wild.trust / 200.0)
+    ball_mods = {"Pokeball":0.1,"Friend Ball":0.15}
+    mod = ball_mods.get(ball_name,0.0)
+    chance = base + trust_factor + mod
+    chance = min(chance,0.95)
+    roll = random.random()
+    print(f"(Catch roll: {roll:.2f} <= {chance:.2f})")
+    if not player.remove_item("balls", ball_name, 1):
+        print("You don't have that ball.")
+        return False, False, None
+    if roll <= chance:
+        print(f"You caught {wild.name}!")
+        player.add_pokemon(wild)
+        player.reputation["dominion"] += 1
+        return True, True, "normal"
+    else:
+        wild.trust = max(0, wild.trust - 5)
+        return True, False, None
+
+FOOD_PREF = {"Fire":"Spicy Berry","Water":"Soft Fruit","Grass":"Soft Fruit","Normal":"Soft Fruit","Fairy":"Soft Fruit"}
+def use_food_on_wild(player: Player, wild: Pokemon, food_name: str, calming_effects=None):
+    pref = FOOD_PREF.get(wild.type, None)
+    if food_name == pref:
+        gain = 20
+        wild.trust = min(100, wild.trust + gain)
+        print(f"{wild.name} eagerly eats the {food_name}! Trust +{gain}.")
+        player.reputation["solace"] += 1
+    else:
+        wild.trust = min(100, wild.trust + 5)
+        print(f"{wild.name} eats the {food_name}. Trust +5.")
+    player.remove_item("food", food_name, 1)
+
+# ------------------------------
+# Battle loop (single-opponent)
+# ------------------------------
+def battle_loop(game, player: Player, active: Pokemon, opponent: Pokemon, trainer_name=None, tutorial=False):
+    forced_befriend = False
+    battle_type = "trainer" if trainer_name else "wild"
+    if trainer_name:
+        print(f"⚔️ Trainer {trainer_name} challenges you!")
+    else:
+        print(f"⚔️ A wild {opponent.name} appears!")
+    while True:
+        if battle_type=="wild" and opponent.trust >= TRUST_THRESHOLD and not forced_befriend:
+            print(f"\n{opponent.name} lowers its tense stance and takes a few steps closer to you, the will to fight gone.")
+            forced_befriend = True
+
+        if active.is_fainted():
+            if player.all_fainted():
+                print("\nAll your Pokémon have fainted!")
+                print("You run back to the Pokémon Center, your Pokéballs in your hands, protecting them from further harm.")
+                game.respawn_player()
+                return "fainted"
+            else:
+                print(f"{active.name} has fainted. Choose another Pokémon.")
+                chosen = player.choose_active()
+                if chosen == "sv_dev":
+                    dev_menu(game); continue
+                if chosen is None:
+                    game.respawn_player(); return "fainted"
+                active = chosen
+
+        if opponent.is_fainted():
+            print(f"{opponent.name} fainted!")
+            active.gain_level()
+            print(f"✨ {active.name} grew to Lv.{active.level}!")
+            reward = 25 if trainer_name else 5
+            player.money += reward
+            print(f"💵 You earned ${reward}!")
+            return "win"
+
+        print(f"\n{active.name} HP: {active.current_hp}/{active.max_hp} | {opponent.name} HP: {opponent.current_hp}/{opponent.max_hp} | Trust: {opponent.trust}")
+        if forced_befriend:
+            print("Actions: 1) Bag")
+            cmd = input("> ").strip()
+            if cmd == "sv_dev":
+                dev_menu(game); continue
+            if cmd != "1":
+                print("Invalid. You can only open your Bag right now.")
+                continue
+            balls = player.bag.get("balls",{})
+            if not balls:
+                print("You have no balls to use.")
+                continue
+            ball_list = list(balls.items())
+            for i,(bname,qty) in enumerate(ball_list,1):
+                print(f"{i}. {bname} x{qty}")
+            sel = input("> ").strip()
+            if sel == "sv_dev":
+                dev_menu(game); continue
+            if not sel.isdigit() or not (1 <= int(sel) <= len(ball_list)):
+                print("Cancelled."); continue
+            chosen_ball = ball_list[int(sel)-1][0]
+            consumed, caught, method = attempt_catch_with_ball(player, opponent, chosen_ball, forced_befriend=True)
+            if caught and method == "friend":
+                return "befriended"
+            else:
+                continue
+        else:
+            print("Actions: 1) Fight  2) Bag  3) Run")
+            cmd = input("> ").strip()
+            if cmd == "sv_dev":
+                dev_menu(game); continue
+            if cmd == "1":
+                moves = list(active.moves.keys())
+                print("\nChoose a move (number or name):")
+                for i,m in enumerate(moves,1):
+                    print(f"{i}. {m} (Power {active.moves[m]['power']}, Type {active.moves[m]['type']})")
+                sel = input("> ").strip()
+                if sel == "sv_dev":
+                    dev_menu(game); continue
+                move_name = None
+                if sel.isdigit():
+                    idx = int(sel)-1
+                    if 0 <= idx < len(moves):
+                        move_name = moves[idx]
+                    else:
+                        print("Invalid move."); continue
+                else:
+                    s = sel.strip().lower()
+                    for m in moves:
+                        if s == m.lower() or s in m.lower():
+                            move_name = m; break
+                    if not move_name:
+                        print("Invalid move."); continue
+                dmg,eff = active.calculate_damage(move_name, opponent)
+                opponent.current_hp = max(0, opponent.current_hp - dmg)
+                msg = " Super effective!" if eff>1 else " Not very effective..." if eff<1 else ""
+                print(f"{active.name} used {move_name}! {dmg} dmg.{msg}")
+            elif cmd == "2":
+                # Bag usage in battle
+                print("\nBag Categories:")
+                categories = ["food","balls","healing","status","stones"]
+                for i,cat in enumerate(categories,1):
+                    print(f"{i}. {cat.title()}")
+                choice = input("> ").strip()
+                if choice == "sv_dev":
+                    dev_menu(game); continue
+                if not choice.isdigit() or not (1 <= int(choice) <= len(categories)):
+                    print("Cancelled."); continue
+                cat = categories[int(choice)-1]
+                items = player.bag.get(cat,{})
+                if not items:
+                    print("Nothing in that category."); continue
+                item_list = list(items.items())
+                for i,(name,qty) in enumerate(item_list,1):
+                    print(f"{i}. {name} x{qty} - {ITEMS.get(name,{}).get('desc','')}")
+                sel = input("> ").strip()
+                if sel == "sv_dev":
+                    dev_menu(game); continue
+                if not sel.isdigit() or not (1 <= int(sel) <= len(item_list)):
+                    print("Cancelled."); continue
+                item_name = item_list[int(sel)-1][0]
+                print(f"\n{item_name}: 1) Use  2) Examine  3) Back")
+                sub = input("> ").strip()
+                if sub == "sv_dev":
+                    dev_menu(game); continue
+                if sub == "2":
+                    print(f"Examine: {ITEMS.get(item_name,{}).get('lore','No info.')}")
+                    continue
+                if sub != "1":
+                    continue
+                if cat == "food":
+                    if battle_type == "trainer":
+                        print("You can’t use food on someone else’s Pokémon."); continue
+                    use_food_on_wild(player, opponent, item_name)
+                elif cat == "balls":
+                    consumed,caught,method = attempt_catch_with_ball(player, opponent, item_name)
+                    if caught:
+                        if tutorial and method != "friend":
+                            return "caught_force"
+                        else:
+                            return "caught"
+                else:
+                    print("Not implemented here.")
+            elif cmd == "3":
+                if battle_type == "trainer":
+                    print("You can't run from a trainer battle!")
+                else:
+                    if random.random() < 0.7:
+                        print("You ran away safely."); return "ran"
+                    else:
+                        print("Couldn't get away!")
+            else:
+                print("Invalid action.")
+
+        # opponent turn
+        if not opponent.is_fainted():
+            move = random.choice(list(opponent.moves.keys()))
+            dmg,eff = opponent.calculate_damage(move, active)
+            active.current_hp = max(0, active.current_hp - dmg)
+            print(f"The {opponent.name} used {move}! {dmg} dmg.")
+            if active.is_fainted():
+                print(f"{active.name} fainted!")
+
+# ------------------------------
+# Forage (simple)
+# ------------------------------
+def forage_area(player: Player, area_name: str):
+    area = FORAGE_AREAS.get(area_name)
+    if not area:
+        print("You can't forage here."); return
+    print(f"\n🌲 You begin foraging in the {area_name}...")
+    time.sleep(0.8)
+    roll = random.random()
+    if roll < area["danger"]:
+        print("🐾 Danger! A wild Pokémon ambushes you!")
+        species = random.choice(POKEDEX_KEYS)
+        info = POKEDEX[species]
+        wild = Pokemon(species, random.randint(2,5), info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+        active = player.choose_active()
+        if active == "sv_dev":
+            dev_menu(Game.instance); return
+        if active:
+            res = battle_loop(Game.instance, player, active, wild)
+            if res in ("win","caught","befriended"):
+                print("You survived the ambush.")
+        else:
+            print("You have no healthy Pokémon to defend you. You run back to town.")
+            return
+    else:
+        found = random.choice(area["common"])
+        cat = ITEMS.get(found,{}).get("category","food")
+        player.add_item(cat, found, 1)
+        print(f"🍎 You found: {found} (added to {cat.title()}).")
+
+# ------------------------------
+# World & Locations (add Striaton Town with gym event)
+# ------------------------------
+class Location:
+    def __init__(self, name, desc, conn, events):
+        self.name = name
+        self.desc = desc
+        self.conn = conn
+        self.events = events
+
+class World:
+    def __init__(self, game):
+        self.game = game
+        self.locations = self.create_locations()
+        self.current = self.locations["Nuvema Outpost"]
+        self.trainers_defeated = set()
+        self.last_town = "Nuvema Outpost"
+    def create_locations(self):
+        return {
+            "Nuvema Outpost": Location("Nuvema Outpost","A battered outpost; the center provides the only steady power.",{"north":"Verdant Trail"},["pokecenter","pokemart"]),
+            "Verdant Trail": Location("Verdant Trail","Overgrown path. Good for foraging.",{"south":"Nuvema Outpost","north":"Ruined Park","east":"Accumula Town"},["wild_encounter"]),
+            "Ruined Park": Location("Ruined Park","Rusting rides and broken benches.",{"south":"Verdant Trail","north":"Scorched Forest"},["wild_encounter","forage_spot"]),
+            "Accumula Town": Location("Accumula Town","A once-proud town, now a dim hub of survivors. Elara's lab hides among the ruins.",{"west":"Verdant Trail","east":"Route 2","north":"Striaton Town"},["pokecenter","pokemart","elara_lab"]),
+            "Route 2": Location("Route 2","A cracked route — good place to learn.",{"west":"Accumula Town","east":"Route 3"},["wild_encounter"]),
+            "Route 3": Location("Route 3","A wide, scarred route where the earth sometimes seems to thrum. Locals whisper about 'shadows'.",{"west":"Route 2","south":"Striaton Town"},["wild_encounter"]),
+            "Striaton Town": Location("Striaton Town","A ruined town with a damaged café-like Gym. Survivors keep a watchful eye.",{"south":"Route 3","west":"Accumula Town"},["pokecenter","pokemart","striaton_arrival","striaton_gym"])
+        }
+    def describe(self):
+        print(f"\n📍 {self.current.name} — {self.current.desc}")
+        if self.current.conn:
+            print("Paths:")
+            for d,t in self.current.conn.items():
+                print(f"- {d.title()} → {t}")
+    def move(self):
+        self.describe()
+        dest = input("> ").strip().lower()
+        if dest == "sv_dev":
+            dev_menu(self.game); return
+        if dest in self.current.conn:
+            self.current = self.locations[self.current.conn[dest]]
+            if "pokecenter" in self.current.events or "pokemart" in self.current.events:
+                self.last_town = self.current.name
+                self.game.player.last_town = self.current.name
+            print(f"\n➡️ You travel {dest} to {self.current.name}...")
+            self.trigger_events_on_entry()
+        else:
+            print("You can't go that way.")
+    def trigger_events_on_entry(self):
+        for e in self.current.events:
+            if e == "wild_encounter":
+                if random.random() < 0.5:
+                    species = random.choice(list(POKEDEX.keys()))
+                    info = POKEDEX[species]
+                    wild = Pokemon(species, random.randint(2,5), info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+                    print(f"🌿 A wild {wild.name} stirs nearby...")
+                    active = self.game.player.choose_active()
+                    if active == "sv_dev":
+                        dev_menu(self.game); return
+                    if active:
+                        battle_loop(self.game, self.game.player, active, wild)
+            if e == "forage_spot":
+                pass
+            if e == "striaton_arrival":
+                # play the arrival scene (only once)
+                if not story_flags.get("striaton_arrived"):
+                    striaton_arrival(self.game)
+            if e == "striaton_gym":
+                # show gym menu if in town
+                pass
+        if any(ev in ("pokecenter","pokemart","elara_lab") for ev in self.current.events):
+            self.town_menu()
+    def town_menu(self):
+        while True:
+            print(f"\n🏙 You are in {self.current.name}. What would you like to do?")
+            print_line_index = 1
+            menu_map = {}
+            if "pokecenter" in self.current.events:
+                print(f"{print_line_index}. Visit PokéCenter"); menu_map[str(print_line_index)] = "pokecenter"; print_line_index += 1
+            if "pokemart" in self.current.events:
+                print(f"{print_line_index}. Visit PokéMart"); menu_map[str(print_line_index)] = "pokemart"; print_line_index += 1
+            if "striaton_gym" in self.current.events:
+                print(f"{print_line_index}. Enter the Gym Hall"); menu_map[str(print_line_index)] = "striaton_gym"; print_line_index += 1
+            print(f"{print_line_index}. Forage"); menu_map[str(print_line_index)] = "forage"; print_line_index += 1
+            print(f"{print_line_index}. Talk"); menu_map[str(print_line_index)] = "talk"; print_line_index += 1
+            print(f"{print_line_index}. Journal"); menu_map[str(print_line_index)] = "journal"; print_line_index += 1
+            print(f"{print_line_index}. Leave"); menu_map[str(print_line_index)] = "leave"
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self.game); continue
+            choice = menu_map.get(c)
+            if choice == "pokecenter":
+                self.event("pokecenter")
+            elif choice == "pokemart":
+                self.event("pokemart")
+            elif choice == "striaton_gym":
+                self.event("striaton_gym")
+            elif choice == "forage":
+                area = self.current.name
+                if area in FORAGE_AREAS:
+                    forage_area(self.game.player, area)
+                else:
+                    print("There's nowhere safe to forage here.")
+            elif choice == "talk":
+                print("\nYou look around and speak to a passerby...")
+                print(f"🗣️ \"{random.choice(NPC_DIALOGUE)}\"")
+            elif choice == "journal":
+                self.game.open_journal()
+            elif choice == "leave":
+                print("You step out of town."); break
+            else:
+                print("Invalid.")
+    def event(self, e):
+        if e == "pokecenter":
+            print("\n🏥 Nurse Joy: '" + random.choice(CENTER_DIALOGUE_ENTER) + "'")
+            for p in self.game.player.team:
+                p.heal_full()
+            print("Your Pokémon have been healed.")
+            add_journal(f"Healed at {self.current.name} Pokémon Center.")
+        elif e == "pokemart":
+            print("\n🛍️ Clerk: '" + random.choice(MART_DIALOGUE_ENTER) + "'")
+            self.pokemart_menu()
+            add_journal(f"Visited PokéMart in {self.current.name}.")
+        elif e == "elara_lab":
+            # If not met, play the first-meeting chain
+            if not story_flags.get("met_elara_in_person"):
+                elara_lab_first_meeting(self.game)
+            else:
+                if story_flags.get("friend_tutorial_started") and not story_flags.get("friend_tutorial_complete"):
+                    print("\n🔬 Elara looks up from a console. \"You should try befriending one on Route 2. I showed you how.\"")
+                else:
+                    print("\n🔬 You enter Elara's lab. Shelves of battered notebooks and jars line the walls.")
+                    print('Elara: "Back again. Keep your partner close; there are answers ahead."')
+                    if story_flags.get("friend_tutorial_complete") and not story_flags.get("quest_route3_started"):
+                        time.sleep(0.4)
+                        elara_next_quest(self.game)
+        elif e == "striaton_arrival":
+            # handled when entering
+            pass
+        elif e == "striaton_gym":
+            # Open gym hall and process the gym sequence
+            striaton_gym_sequence(self.game)
+        else:
+            print("Nothing happens.")
+    def pokemart_menu(self):
+        while True:
+            print(f"\n💰 Welcome to the PokéMart. You have ${self.game.player.money}.")
+            print("1) Buy  2) Sell Foraged  3) Talk  4) Leave")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self.game); continue
+            if c == "1":
+                while True:
+                    print("\nCategories: 1) Balls  2) Food  3) Healing  4) Back")
+                    cat_choice = input("> ").strip()
+                    if cat_choice == "sv_dev":
+                        dev_menu(self.game); continue
+                    cats = {"1":"balls","2":"food","3":"healing"}
+                    if cat_choice == "4":
+                        break
+                    if cat_choice not in cats:
+                        print("Invalid."); continue
+                    cat = cats[cat_choice]
+                    items = POKEMART_ITEMS.get(cat,{})
+                    if not items:
+                        print("No items in this category."); continue
+                    for i,(name,data) in enumerate(items.items(),1):
+                        print(f"{i}. {name} - ${data['price']}\n   {data['desc']}")
+                    sel = input("\nEnter number to view or Enter to cancel: ").strip()
+                    if sel == "sv_dev":
+                        dev_menu(self.game); continue
+                    if not sel:
+                        continue
+                    if not sel.isdigit() or not (1 <= int(sel) <= len(items)):
+                        print("Invalid."); continue
+                    item_name = list(items.keys())[int(sel)-1]
+                    item_data = items[item_name]
+                    print(f"\n{item_name}: 1) Buy  2) Ask about  3) Back")
+                    a = input("> ").strip()
+                    if a == "sv_dev":
+                        dev_menu(self.game); continue
+                    if a == "2":
+                        print(f"🗣️ Clerk: \"{item_data.get('lore','No info available.')}\""); continue
+                    if a != "1":
+                        continue
+                    print(f"Buy {item_name} for ${item_data['price']}? (y/n)")
+                    if input("> ").strip().lower() == "y":
+                        if self.game.player.money >= item_data['price']:
+                            self.game.player.money -= item_data['price']
+                            category = ITEMS[item_name]["category"]
+                            self.game.player.add_item(category, item_name, 1)
+                            print("Stay alive out there.")
+                        else:
+                            print("You don't have enough money.")
+            elif c == "2":
+                foods = self.game.player.bag.get("food",{})
+                if not foods:
+                    print("You have no foraged food to sell."); continue
+                print("Your foraged foods:")
+                items = list(foods.items())
+                for i,(name,qty) in enumerate(items,1):
+                    sell_price = 25
+                    print(f"{i}. {name} x{qty} (Sell for ${sell_price} each)")
+                sel = input("Enter number to sell one (or Enter to cancel): ").strip()
+                if sel == "sv_dev":
+                    dev_menu(self.game); continue
+                if not sel:
+                    continue
+                if not sel.isdigit() or not (1 <= int(sel) <= len(items)):
+                    print("Invalid."); continue
+                item_name = items[int(sel)-1][0]
+                if self.game.player.remove_item("food", item_name, 1):
+                    self.game.player.money += 25
+                    print(f"Sold one {item_name} for $25.")
+            elif c == "3":
+                print("\n🗣️ Clerk: \"" + random.choice(NPC_DIALOGUE) + "\"")
+            elif c == "4":
+                print("🛒 Clerk: 'Come back anytime.'"); break
+            else:
+                print("Invalid.")
+
+# ------------------------------
+# Cutscenes & Quest chain: Elara -> Route3 -> Striaton
+# ------------------------------
+def play_cutscene(name, game):
+    scenes = {"intro_confrontation": intro_confrontation_scene}
+    fn = scenes.get(name)
+    if fn:
+        fn(game)
+
+def intro_confrontation_scene(game):
+    if story_flags.get("intro_scene_complete"):
+        return
+    player = game.player
+    print("\nAs you step out of the Pokémon Center, the wind carries the sound of shouting...")
+    time.sleep(0.8)
+    print("Marshal Dorian, a man in a dark uniform, stands with a clenched Poké Ball.")
+    time.sleep(0.6)
+    print('"Submit," he growls. "This is mercy. Humanity must reclaim control."')
+    time.sleep(0.6)
+    print("A woman steps between them — Elara of Team Solace. She stands firm.")
+    time.sleep(0.6)
+    print('"We believe in trust," she says. "Not chains."')
+    time.sleep(0.6)
+    print("Dorian sneers and walks off into the fog. Elara turns to you.")
+    time.sleep(0.6)
+    print('"Meet me at my lab in Accumula Town if you want answers," she says quietly.')
+    add_journal("You witnessed a clash between Team Dominion and Team Solace; Elara asked you to meet her in Accumula Town.")
+    story_flags["intro_scene_complete"] = True
+    story_flags["next_objective"] = "Meet Elara at her lab in Accumula Town"
+    player.reputation["solace"] = player.reputation.get("solace",0) + 2
+
+def elara_lab_first_meeting(game):
+    player = game.player
+    print("\n🔬 You step inside Elara’s lab. The faint buzz of old machinery fills the air.")
+    time.sleep(0.6)
+    print('"You made it," she says. "Good."')
+    time.sleep(0.5)
+    print('"These are Friend Balls. They invite, not force."')
+    time.sleep(0.4)
+    print("\n🎁 Elara gives you 5 Friend Balls and 5 Soft Fruit.")
+    player.add_item("balls","Friend Ball",5)
+    player.add_item("food","Soft Fruit",5)
+    add_journal("You met Elara in her lab and received Friend Balls and food.")
+    story_flags["received_friend_balls"] = True
+    time.sleep(0.6)
+    print('"Come with me," she says. "I will show you on Route 2."')
+    time.sleep(0.6)
+    # move player to Route 2 for demo
+    if "Route 2" in game.world.locations:
+        game.world.current = game.world.locations["Route 2"]
+    print("\n🌲 [You follow Elara to Route 2...]")
+    time.sleep(0.8)
+    print("A timid Patrat scurries by. Elara demonstrates: she feeds it, waits, then uses a Friend Ball.")
+    time.sleep(0.6)
+    print("The Patrat joins her without a fight.")
+    time.sleep(0.6)
+    print('\n"Your turn," Elara says. "Try feeding one yourself."')
+    story_flags["met_elara_in_person"] = True
+    story_flags["friend_tutorial_started"] = True
+    story_flags["friend_tutorial_complete"] = False
+    story_flags["next_objective"] = "Befriend a Pokémon on Route 2."
+    add_journal("Elara demonstrated befriending on Route 2. Try it yourself.")
+    # auto-trigger tutorial encounter
+    print("\n⚡ A wild Patrat appears right in front of you! Elara steps back to watch.")
+    time.sleep(0.5)
+    info = POKEDEX.get("Patrat")
+    if info:
+        wild = Pokemon("Patrat",4,info["base_hp"],info["base_atk"],info["base_def"],info["moves"],info["type"])
+    else:
+        wild = Pokemon("Patrat",4,22,8,7,{"Tackle":{"power":5,"type":"Normal"},"Bite":{"power":8,"type":"Dark"}},"Normal")
+    active = player.choose_active()
+    if active == "sv_dev":
+        dev_menu(game)
+        active = player.choose_active()
+    if not active:
+        print("You have no healthy Pokémon to do this with. Elara helps you return.")
+        game.world.current = game.world.locations.get("Accumula Town", game.world.current)
+        return
+    result = battle_loop(game, player, active, wild, trainer_name=None, tutorial=True)
+    if result == "befriended":
+        elara_post_befriend(game)
+    else:
+        elara_post_failure(game)
+
+def elara_post_befriend(game):
+    print("\n🌤 You return to Elara’s lab. She smiles softly.")
+    time.sleep(0.4)
+    print('"You did it," she says. "You earned its trust."')
+    add_journal("You befriended a Patrat as Elara taught you. Elara praised you.")
+    game.player.reputation["solace"] = game.player.reputation.get("solace",0) + 10
+    story_flags["friend_tutorial_complete"] = True
+    story_flags["next_objective"] = "Speak with Elara about what comes next."
+    # immediately start the next quest chain (Elara -> Marshal -> Route 3)
+    time.sleep(0.6)
+    elara_next_quest(game)
+
+def elara_post_failure(game):
+    print("\n🌫 You return to Elara’s lab. She looks disappointed.")
+    time.sleep(0.4)
+    print('"So... that’s how you chose to do it."')
+    add_journal("You failed Elara's befriending lesson (captured or fought). She was disappointed.")
+    game.player.reputation["dominion"] = game.player.reputation.get("dominion",0) + 10
+    story_flags["friend_tutorial_complete"] = True
+    story_flags["next_objective"] = "Reflect on Elara’s disappointment before continuing your journey."
+    # still issue the quest, just with different tone
+    time.sleep(0.6)
+    elara_next_quest(game)
+
+def elara_next_quest(game):
+    """
+    Elara issues the Route 3 investigation quest and — as you leave the lab — Marshal appears to warn you.
+    Then the player finds the corrupted Sylveon scene on Route 3.
+    """
+    if story_flags.get("quest_route3_started"):
+        return
+    print("\nElara folds her hands, eyes on a flickering screen. \"There are strange signals on Route 3,\" she says.")
+    time.sleep(0.6)
+    print('"Pokémon disappearing. Residual energy signatures like nothing I’ve mapped before."')
+    time.sleep(0.6)
+    print('"I want you to go. Look for anything that feels off — and come back to me with what you find."')
+    add_journal("Elara detected strange signals near Route 3 and asked you to investigate.")
+    story_flags["quest_route3_started"] = True
+    story_flags["next_objective"] = "Investigate strange activity on Route 3."
+    # move player to Accumula Town (we're in lab)
+    if "Accumula Town" in game.world.locations:
+        game.world.current = game.world.locations["Accumula Town"]
+    time.sleep(0.6)
+    print("\nYou step outside Elara's lab — Marshal is leaning by the road, waiting.")
+    # marshal encounter
+    route3_marshal_encounter(game)
+    # after marshal, proceed toward Route 3 and trigger corrupted scene
+    time.sleep(0.6)
+    print("\nYou head toward Route 3 to investigate the signals...")
+    # set location and trigger the corrupted scene
+    if "Route 3" in game.world.locations:
+        game.world.current = game.world.locations["Route 3"]
+    route3_corrupted_scene(game)
+
+def route3_marshal_encounter(game):
+    """
+    Marshal appears outside Elara's lab and explains Dominion's position.
+    """
+    if story_flags.get("marshal_met_route3"):
+        return
+    print("\nA tall man in a dark, evenly-cut coat leans against a crumbling fence. Marshal Dorian.")
+    time.sleep(0.6)
+    print('He looks at you with eyes that have seen too many ends. "So, Elara sent you," he says quietly.')
+    time.sleep(0.6)
+    print('"You think feeding and talking will fix everything? When the corruption comes, those choices can leave people dead."')
+    time.sleep(0.6)
+    print('"Dominion acts to protect the survivors. Order is sometimes the only mercy."')
+    time.sleep(0.6)
+    print('He studies you a moment. "If you find something on Route 3... be careful. This is not a simple job."')
+    add_journal("Marshal appeared and warned you about what may be on Route 3.")
+    story_flags["marshal_met_route3"] = True
+
+def route3_corrupted_scene(game):
+    """
+    The player witnesses two Dominion grunts failing to capture a corrupted Sylveon.
+    Pokéballs bounce off; the creature's ribbons are replaced by tendrils (shadowy).
+    Then there's a tattered field note you can interact with.
+    """
+    if story_flags.get("sylveon_scene_seen"):
+        # If already seen, allow searching for note if not yet taken
+        if not story_flags.get("route3_note_taken"):
+            route3_note_interaction(game)
+        return
+    print("\nThe air thins as you step into a hollow field on Route 3. Mist hangs in clumps.")
+    time.sleep(0.8)
+    print("Voices crack ahead — panicked, clipped orders.")
+    time.sleep(0.5)
+    print('\nDominion Grunt 1: "It’s— it’s not holding still! Just throw another ball!"')
+    time.sleep(0.6)
+    print('Dominion Grunt 2: "I already tried! They just bounce off! It’s like— it’s rejecting capture!"')
+    time.sleep(0.7)
+    print("\nYou move closer and see why. A Sylveon-like creature watches the grunts with hollow eyes.")
+    time.sleep(0.8)
+    # descriptive, eerie tendrils (safe, not graphic)
+    print("Where soft ribbons should have fluttered, a cluster of shadowy tendrils writhes gently — alive with a strange darkness.")
+    time.sleep(0.8)
+    print("A thrown Pokéball arcs toward the creature — it taps the tendrils and skitters off, useless.")
+    time.sleep(0.8)
+    print('\nDominion Grunt 1: "Bring it in alive! The report said—"')
+    time.sleep(0.6)
+    print('Dominion Grunt 2 (panicking): "I can’t. It’s like the ball hits a wall and bounces off!"')
+    time.sleep(0.7)
+    print("The corrupted creature lets out a sound that isn’t quite a cry — layered and warped.")
+    time.sleep(0.8)
+    print("The grunts drop a cracked Pokéball and run, tripping through the mist.")
+    time.sleep(0.6)
+    print('Marshal’s voice from earlier lingers in your mind: "When you see what’s waiting on Route 3… you’ll understand."')
+    time.sleep(0.6)
+    print("\nFor a moment the Sylveon stares straight at you. The tendrils fall still, as if listening.")
+    time.sleep(0.8)
+    print("It turns and steps into the mist, the shadows swallowing its form until there is only silence.")
+    add_journal("You witnessed Dominion grunts failing to capture a corrupted Sylveon on Route 3. Its tendrils repelled their Pokéballs.")
+    story_flags["sylveon_scene_seen"] = True
+    story_flags["quest_route3_progress"] = "Investigate the corruption further"
+    story_flags["next_objective"] = "Search Route 3 for clues to the corrupted Pokémon."
+    # now present the tattered field note nearby
+    time.sleep(0.6)
+    route3_note_interaction(game)
+
+def route3_note_interaction(game):
+    """
+    Interaction with the tattered field note found on Route 3.
+    Gives player options to read & keep, destroy, or leave it.
+    Reading adds journal entry; choices affect reputation.
+    """
+    if story_flags.get("route3_note_taken"):
+        return
+    print("\nSomething flutters at your feet — a tattered field note, half-buried in the mud.")
+    time.sleep(0.5)
+    while True:
+        print("\nWhat do you do with the note?")
+        print("1) Read and keep it")
+        print("2) Destroy it")
+        print("3) Leave it")
+        c = input("> ").strip()
+        if c == "sv_dev":
+            dev_menu(game); continue
+        if c == "1":
+            note_text = (
+                "—Day 12—\n"
+                "The shadows are spreading faster now. Pokémon no longer flee; they watch.\n"
+                "We thought the corruption was confined to the ruins, but last night even the moonlight bent around the shapes in the mist.\n"
+                "Their cries sound familiar, but wrong… like echoes from dreams that should’ve stayed forgotten.\n"
+                "— Unidentified Researcher"
+            )
+            print("\nYou carefully fold the note and slip it into your pack.")
+            add_journal("You found a tattered field note about corrupted Pokémon on Route 3:\n" + note_text)
+            # reputation small positive for Solace approach
+            game.player.reputation["solace"] += 1
+            print("Solace reputation +1.")
+            story_flags["route3_note_taken"] = True
+            break
+        elif c == "2":
+            print("\nYou tear the note and drop the pieces into the mud. Maybe some secrets are too dangerous to spread.")
+            add_journal("You destroyed a field note about corrupted Pokémon on Route 3.")
+            game.player.reputation["dominion"] += 1
+            print("Dominion reputation +1.")
+            story_flags["route3_note_taken"] = True
+            break
+        elif c == "3":
+            print("\nYou leave the note where it lies, half-hidden in the mist.")
+            break
+        else:
+            print("Invalid.")
+
+# ------------------------------
+# Striaton arrival + Gym sequence (v1.6 storytime)
+# ------------------------------
+def striaton_arrival(game):
+    """
+    Arrival scene in Striaton Town: Elara greets you, asks you to meet the Gym Leader.
+    This plays once when first arriving at Striaton Town after Route 3 sequence.
+    """
+    if story_flags.get("striaton_arrived"):
+        return
+    print("\nYou step into what remains of Striaton Town.")
+    time.sleep(1.0)
+    print("Once bright streets are now lined with makeshift lanterns and cracked stone paths.")
+    time.sleep(1.0)
+    print("Survivors murmur quietly near the Pokémon Center.")
+    time.sleep(1.0)
+    print("\nElara spots you from across the square and waves, relief softening her features.")
+    time.sleep(1.0)
+    print('"You made it through Route 3! I was starting to worry," she says, smiling faintly.')
+    time.sleep(1.0)
+    print('"The corruption’s spreading faster than we thought… but Striaton’s holding strong."')
+    time.sleep(1.2)
+    print('"If you’re ready, I want you to meet the Gym Leader here. She’s testing trainers who still believe in partnership."')
+    time.sleep(1.2)
+    print('"Win—or at least try—and show them hope isn’t gone yet."')
+    add_journal("Elara greeted you in Striaton Town and asked you to face the Striaton Gym Leader.")
+    story_flags['striaton_unlocked'] = True
+    story_flags['striaton_arrived'] = True
+    story_flags['next_objective'] = "Challenge the Striaton Gym Leader to prove partnership still matters."
+
+def striaton_gym_sequence(game):
+    """
+    The Shattered Duo: Cilan & Chili fight together. Implemented as two sequential trainer battles for compatibility.
+    Emotional cutscenes included.
+    """
+    if story_flags.get("striaton_gym_cleared"):
+        print("\nThe Gym is quiet. Cilan and Chili watch from the back, their faces tired.")
+        return
+
+    print("\nYou enter the Gym Hall. The restaurant is in disrepair — overturned tables, ash-stained curtains.")
+    time.sleep(1.0)
+    print("Two figures stand waiting: a man with a calm, hollow air (Cilan), and another with a restless glare (Chili).")
+    time.sleep(1.0)
+    print('\nCilan (softly): "A visitor. We don’t get many. Are you one of Elara’s hopefuls?"')
+    time.sleep(1.0)
+    print('\nChili (barks): "Hopefuls... hope got us burned, but if you want a badge—fight us. Show us your heart."')
+    time.sleep(1.0)
+    print('\nCilan: "We will fight together—not to win a prize, but to remember what part of us still cares."')
+    add_journal("You entered the Striaton Gym and met Cilan and Chili — they challenged you together.")
+    time.sleep(1.0)
+
+    # Trainer 1: Cilan (3 Pokémon)
+    cilan_team = [
+        ("Pansage", 7),
+        ("Simisage", 9),
+        ("Leavanny", 10)
+    ]
+    print("\nCilan steps forward to battle. His voice is soft, but firm.")
+    time.sleep(0.6)
+    for species, lvl in cilan_team:
+        info = POKEDEX.get(species)
+        wild = Pokemon(species, lvl, info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+        active = game.player.choose_active()
+        if active == "sv_dev":
+            dev_menu(game)
+            active = game.player.choose_active()
+        if not active:
+            print("You have no healthy Pokémon. The gym trainers look on solemnly.")
+            return
+        res = battle_loop(game, game.player, active, wild, trainer_name="Cilan")
+        if res == "fainted":
+            print("You were forced to retreat from the Gym. Heal and return.")
+            return
+    print("\nCilan breathes out, nodding. \"You fought well.\"")
+    time.sleep(0.8)
+
+    # Trainer 2: Chili (3 Pokémon)
+    chili_team = [
+        ("Pansear", 7),
+        ("Simisear", 9),
+        ("Darmanitan", 11)
+    ]
+    print("\nChili steps forward, hands clenched. His voice shakes, but he speaks with force.")
+    time.sleep(0.6)
+    for species, lvl in chili_team:
+        info = POKEDEX.get(species)
+        wild = Pokemon(species, lvl, info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+        active = game.player.choose_active()
+        if active == "sv_dev":
+            dev_menu(game)
+            active = game.player.choose_active()
+        if not active:
+            print("You have no healthy Pokémon. The gym trainers look on solemnly.")
+            return
+        res = battle_loop(game, game.player, active, wild, trainer_name="Chili")
+        if res == "fainted":
+            print("You were forced to retreat from the Gym. Heal and return.")
+            return
+    # Victory
+    print("\nChili staggers back, breathing hard. Cilan wipes ash from a table and slowly reaches into his pocket.")
+    time.sleep(1.0)
+    print('\nCilan (quietly): "We don’t have much… but this symbol matters. Take it."')
+    # give Trio Badge
+    game.player.add_item("badges", "Trio Badge", 1)
+    add_journal("You defeated Cilan and Chili in the Striaton Gym. You received the Trio Badge (cracked).")
+    story_flags["striaton_gym_cleared"] = True
+    story_flags['next_objective'] = "Return to Elara or continue exploring Striaton."
+    time.sleep(1.0)
+    print("\nElara steps forward for a moment, eyes soft.")
+    print('"You did well. Keep your heart steady — the ruins ahead will test it."')
+    time.sleep(0.8)
+    print('She turns, then walks away into the evening fog. "I must go west, to the ruins by Nacrene," she says, voice distant.')
+    add_journal("Elara left Striaton Town heading toward the ruins west of Nacrene.")
+    # mark Elara leaving (we won't track her location fully here)
+    game.player.reputation["solace"] += 2
+
+# ------------------------------
+# Developer menu (unchanged)
+# ------------------------------
+def dev_menu(game):
+    global DEV_FORCED_NIGHT
+    while True:
+        print("\n--- DEVELOPER MENU ---")
+        print("[1] Teleport to location")
+        print("[2] View player data")
+        print("[3] Add money")
+        print("[4] Heal team")
+        print(f"[5] Toggle forced-night (current: {DEV_FORCED_NIGHT})")
+        print("[6] Adjust reputation")
+        print("[7] Exit dev menu")
+        choice = input("> ").strip()
+        if choice == "1":
+            locs = list(game.world.locations.keys())
+            for i,l in enumerate(locs,1):
+                print(f"{i}. {l}")
+            sel = input("Teleport to: ").strip()
+            if sel.isdigit() and 1 <= int(sel) <= len(locs):
+                game.world.current = game.world.locations[locs[int(sel)-1]]
+                print(f"Teleported to {game.world.current.name}.")
+        elif choice == "2":
+            print(json.dumps(game.player.to_dict(), indent=2))
+        elif choice == "3":
+            amt = input("Add how much money? ").strip()
+            if amt.isdigit():
+                game.player.money += int(amt)
+                print(f"Money added. New balance: ${game.player.money}")
+        elif choice == "4":
+            for p in game.player.team:
+                p.heal_full()
+            print("All team healed.")
+        elif choice == "5":
+            if DEV_FORCED_NIGHT is None:
+                DEV_FORCED_NIGHT = True
+            elif DEV_FORCED_NIGHT is True:
+                DEV_FORCED_NIGHT = False
+            else:
+                DEV_FORCED_NIGHT = None
+            print("DEV_FORCED_NIGHT set to:", DEV_FORCED_NIGHT)
+        elif choice == "6":
+            print("Reputation before:", game.player.reputation)
+            sol = input("Set Solace value (or Enter to skip): ").strip()
+            dom = input("Set Dominion value (or Enter to skip): ").strip()
+            if sol.isdigit():
+                game.player.reputation["solace"] = int(sol)
+            if dom.isdigit():
+                game.player.reputation["dominion"] = int(dom)
+            print("Reputation now:", game.player.reputation)
+        elif choice == "7":
+            break
+        else:
+            print("Invalid.")
+
+# ------------------------------
+# Main Game class (with Journal)
+# ------------------------------
+class Game:
+    instance = None
+    def __init__(self):
+        Game.instance = self
+        self.player = None
+        self.world = None
+        self.browser_mode = False
+    def title_screen(self):
+        print("="*60)
+        print("🌑 POKE ENGINE THING — STORYTIME")
+        print('v1.6 — "storytime"')
+        print("TEST BUILD — DOES NOT REFLECT HOW GAME WILL ACTUALLY PLAY (UWU)")
+        print("="*60)
+        time.sleep(0.6)
+    def start(self):
+        self.title_screen()
+        print("Choose save type:")
+        print("1. Browser memory (for web runners)")
+        print("2. Local file (save.json)")
+        self.browser_mode = (input("> ").strip() == "1")
+        while True:
+            print("\nMain Menu: 1) New Game  2) Load Game  3) Quit")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self); continue
+            if c == "1":
+                self.new_game(); break
+            elif c == "2":
+                if self.load_game(): break
+            elif c == "3":
+                print("Goodbye."); return
+            else:
+                print("Invalid.")
+    def new_game(self):
+        name = input("Enter your name: ").strip() or "Trainer"
+        self.player = Player(name)
+        add_journal("You woke up in a broken Pokémon Center after the lab incident.")
+        print("\nYou wake in a dim Pokémon Center. A faint alarm hums in the background.")
+        print("Nurse Joy approaches you, eyes tired but relieved.")
+        print("\"You're awake... the lab incident— many didn't make it. Three survivors were in the containment room.\"")
+        print("\"Choose one. They need someone.\"")
+        starters = ["Snivy","Tepig","Oshawott"]  # Cyndaquil removed
+        for i,k in enumerate(starters,1):
+            t = POKEDEX.get(k,{}).get("type","?")
+            print(f"{i}. {k} ({t}) - Survivor")
+        while True:
+            sel = input("> ").strip()
+            if sel == "sv_dev":
+                dev_menu(self); continue
+            if sel.isdigit() and 1 <= int(sel) <= len(starters):
+                starter_name = starters[int(sel)-1]
+                info = POKEDEX[starter_name]
+                p = Pokemon(starter_name,5,info["base_hp"],info["base_atk"],info["base_def"],info["moves"],info["type"])
+                self.player.add_pokemon(p)
+                # play intro cutscene (only once)
+                try:
+                    play_cutscene("intro_confrontation", self)
+                except Exception:
+                    pass
+                break
+            else:
+                print("Choose quickly, there's little time.")
+        self.world = World(self)
+        self.player.last_town = self.world.current.name
+        if any(ev in ("pokecenter","pokemart","elara_lab") for ev in self.world.current.events):
+            self.world.town_menu()
+        self.main_loop()
+    def main_loop(self):
+        while True:
+            print("\nWhat will you do next?")
+            print("1. Move  2. Team  3. Bag  4. Forage nearby  5. Save  6. Load  7. Journal  8. Quit")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self); continue
+            if c == "1":
+                self.world.move()
+            elif c == "2":
+                self.player.show_team()
+            elif c == "3":
+                self.open_bag_menu()
+            elif c == "4":
+                area = self.world.current.name
+                if area in FORAGE_AREAS:
+                    forage_area(self.player, area)
+                else:
+                    print("There's nowhere safe to forage here.")
+            elif c == "5":
+                self.save_game()
+            elif c == "6":
+                self.load_game()
+            elif c == "7":
+                self.open_journal()
+            elif c == "8":
+                print("Goodbye."); break
+            else:
+                print("Invalid.")
+    def open_bag_menu(self):
+        while True:
+            print("\n=== BAG ===")
+            print(f"Money: ${self.player.money}")
+            cats = ["food","balls","healing","status","stones","badges","back"]
+            for i,cat in enumerate(cats,1):
+                if cat=="back":
+                    print(f"{i}. Back")
+                else:
+                    items = self.player.bag.get(cat,{})
+                    print(f"{i}. {cat.title()} ({sum(items.values())} items)")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self); continue
+            if not c.isdigit() or not (1 <= int(c) <= len(cats)):
+                print("Invalid."); continue
+            idx = int(c)-1
+            if cats[idx] == "back":
+                break
+            cat = cats[idx]
+            items = self.player.bag.get(cat,{})
+            if not items:
+                print("No items in this category."); continue
+            item_list = list(items.items())
+            for i,(name,qty) in enumerate(item_list,1):
+                desc = ITEMS.get(name,{}).get("desc","")
+                print(f"{i}. {name} x{qty} - {desc}")
+            print(f"{len(item_list)+1}. Back")
+            sel = input("> ").strip()
+            if sel == "sv_dev":
+                dev_menu(self); continue
+            if not sel.isdigit(): continue
+            sel = int(sel)
+            if sel == len(item_list)+1:
+                continue
+            if not (1 <= sel <= len(item_list)): continue
+            item_name = item_list[sel-1][0]
+            print(f"\n{item_name}: 1) Use  2) Examine  3) Back")
+            sub = input("> ").strip()
+            if sub == "sv_dev":
+                dev_menu(self); continue
+            if sub == "2":
+                print(f"Examine: {ITEMS.get(item_name,{}).get('lore','No additional info.')}")
+                continue
+            if sub != "1":
+                continue
+            if cat == "food":
+                print("Use food from the team screen or in wild battles.")
+                continue
+            elif cat == "balls":
+                print("Balls are used in battle to capture Pokémon.")
+                continue
+            elif cat == "healing":
+                if not self.player.team:
+                    print("No Pokémon to heal."); continue
+                print("Choose a Pokémon to heal:")
+                for i,p in enumerate(self.player.team,1):
+                    print(f"{i}. {p.name} ({p.current_hp}/{p.max_hp})")
+                ch = input("> ").strip()
+                if ch == "sv_dev":
+                    dev_menu(self); continue
+                if not ch.isdigit() or not (1 <= int(ch) <= len(self.player.team)):
+                    print("Cancelled."); continue
+                target = self.player.team[int(ch)-1]
+                heal_vals = {"Potion":20,"Super Potion":50}
+                heal_amt = heal_vals.get(item_name,0)
+                target.current_hp = min(target.max_hp, target.current_hp + heal_amt)
+                self.player.remove_item(cat, item_name, 1)
+                print(f"{target.name} healed {heal_amt} HP.")
+            elif cat == "stones":
+                if not self.player.team:
+                    print("No Pokémon to use the stone on."); continue
+                print("Choose a Pokémon to use this stone on:")
+                for i,p in enumerate(self.player.team,1):
+                    print(f"{i}. {p.name} Lv{p.level}")
+                ch = input("> ").strip()
+                if ch == "sv_dev":
+                    dev_menu(self); continue
+                if not ch.isdigit() or not (1 <= int(ch) <= len(self.player.team)):
+                    print("Cancelled."); continue
+                target = self.player.team[int(ch)-1]
+                # stone evolution simplified: remove stone and show message
+                if self.player.remove_item("stones", item_name, 1):
+                    print(f"You used {item_name} on {target.name}. (Evolution logic not fully implemented here.)")
+                else:
+                    print("You don't have that stone.")
+    def respawn_player(self):
+        town = self.player.last_town or self.world.last_town
+        print(f"\nYou awaken safely back in {town}'s Pokémon Center.")
+        if town in self.world.locations:
+            self.world.current = self.world.locations[town]
+        else:
+            self.world.current = self.world.locations[self.world.last_town]
+        for p in self.player.team:
+            p.heal_full()
+        self.world.town_menu()
+    def save_game(self):
+        data = {"player": self.player.to_dict(), "location": self.world.current.name, "story_flags": story_flags, "journal": JOURNAL}
+        if self.browser_mode:
+            global BROWSER_SAVE
+            BROWSER_SAVE = json.dumps(data)
+            print("💾 Game saved to browser memory (temporary).")
+            add_journal("Saved game to browser memory.")
+        else:
+            with open(SAVE_FILE,"w") as f:
+                json.dump(data,f,indent=2)
+            print(f"💾 Game saved to {SAVE_FILE}.")
+            add_journal("Saved game to disk.")
+    def load_game(self):
+        global BROWSER_SAVE, JOURNAL
+        data = None
+        if self.browser_mode:
+            if not BROWSER_SAVE:
+                print("No browser save found."); return False
+            data = json.loads(BROWSER_SAVE)
+        else:
+            if not os.path.exists(SAVE_FILE):
+                print("No save file found."); return False
+            with open(SAVE_FILE,"r") as f:
+                data = json.load(f)
+        self.player = Player.from_dict(data["player"])
+        # restore story flags
+        sf = data.get("story_flags",{})
+        for k,v in sf.items():
+            story_flags[k] = v
+        # restore journal
+        JOURNAL = data.get("journal", JOURNAL)
+        self.world = World(self)
+        self.world.current = self.world.locations.get(data.get("location","Nuvema Outpost"), self.world.current)
+        print("✅ Game loaded.")
+        if any(ev in ("pokecenter","pokemart","elara_lab") for ev in self.world.current.events):
+            self.world.town_menu()
+        else:
+            self.main_loop()
+        return True
+    def open_journal(self):
+        while True:
+            print("\n=== JOURNAL ===")
+            print("1. Story Entries")
+            print("2. Current Objective")
+            print("3. Reputation")
+            print("4. Pokémon Relationships")
+            print("5. Save Game")
+            print("6. Close Journal")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self); continue
+            if c == "1":
+                if not JOURNAL:
+                    print("\n(Your journal is empty.)")
+                else:
+                    print("\n-- Story Entries --")
+                    for e in JOURNAL[-50:]:
+                        print(e)
+            elif c == "2":
+                print("\nCurrent Objective:", story_flags.get("next_objective","None"))
+            elif c == "3":
+                print("\nReputation — Team Solace:",# ==========================================
+# 🌑 POKE ENGINE THING — STORYTIME
+#    v1.6 — "storytime"
+#    Includes: Striaton Town arrival, Elara reunion, Dual-brother Gym (Cilan & Chili)
+#    TEST BUILD — DOES NOT REFLECT HOW GAME WILL ACTUALLY PLAY (UWU)
+# ==========================================
+
+import json, os, random, time, datetime
+
+# ------------------------------
+# Config / Globals
+# ------------------------------
+SAVE_FILE = "save.json"
+BROWSER_SAVE = None
+TRUST_THRESHOLD = 70  # trust required for "forced befriending" state
+DEV_FORCED_NIGHT = None  # None = use real time; True = force night; False = force day
+
+# Story flags (persisted in save)
+story_flags = {
+    "intro_scene_complete": False,
+    "next_objective": None,
+    "met_elara_in_person": False,
+    "received_friend_balls": False,
+    "friend_tutorial_started": False,
+    "friend_tutorial_complete": False,
+    # route3 flags
+    "quest_route3_started": False,
+    "marshal_met_route3": False,
+    "sylveon_scene_seen": False,
+    "quest_route3_progress": None,
+    "route3_note_taken": False,
+    # striaton flags
+    "striaton_unlocked": False,
+    "striaton_arrived": False,
+    "striaton_gym_cleared": False
+}
+
+# Journal (list of entries)
+JOURNAL = []
+
+# ------------------------------
+# Helpers
+# ------------------------------
+def is_night():
+    global DEV_FORCED_NIGHT
+    if DEV_FORCED_NIGHT is True:
+        return True
+    if DEV_FORCED_NIGHT is False:
+        return False
+    now = datetime.datetime.now().hour
+    return now >= 20 or now <= 5
+
+def plural(n, s):
+    return f"{n} {s}" if n == 1 else f"{n} {s}s"
+
+def add_journal(entry):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    JOURNAL.append(f"[{timestamp}] {entry}")
+
+# ------------------------------
+# Type / Pokedex (trimmed, functional)
+# ------------------------------
+TYPE_POOL = ["Normal","Fire","Water","Grass","Electric","Rock","Ground","Flying","Psychic","Dark","Ghost","Ice","Steel","Poison","Fighting","Bug","Fairy","Dragon"]
+
+def deterministic_type(name):
+    h = sum(ord(c) for c in name)
+    return TYPE_POOL[h % len(TYPE_POOL)]
+
+POKEDEX = {
+    "Snivy": {"type":"Grass","base_hp":24,"base_atk":9,"base_def":8,"moves":{"Tackle":{"power":5,"type":"Normal"},"Vine Whip":{"power":7,"type":"Grass"}}},
+    "Tepig": {"type":"Fire","base_hp":26,"base_atk":10,"base_def":8,"moves":{"Tackle":{"power":5,"type":"Normal"},"Ember":{"power":7,"type":"Fire"}}},
+    "Oshawott": {"type":"Water","base_hp":25,"base_atk":9,"base_def":9,"moves":{"Tackle":{"power":5,"type":"Normal"},"Water Gun":{"power":7,"type":"Water"}}},
+    "Patrat": {"type":"Normal","base_hp":22,"base_atk":8,"base_def":7,"moves":{"Tackle":{"power":5,"type":"Normal"},"Bite":{"power":8,"type":"Dark"}}},
+    "Pidove": {"type":"Normal","base_hp":20,"base_atk":7,"base_def":6,"moves":{"Tackle":{"power":5,"type":"Normal"},"Gust":{"power":7,"type":"Flying"}}},
+    "Eevee": {"type":"Normal","base_hp":20,"base_atk":8,"base_def":7,"moves":{"Tackle":{"power":5,"type":"Normal"},"Growl":{"power":0,"type":"Normal"}}},
+    "Sylveon_Corrupted": {"type":"Fairy","base_hp":34,"base_atk":15,"base_def":12,"moves":{"Strange Tendril":{"power":10,"type":"Fairy"},"Howl of Loss":{"power":12,"type":"Dark"}}},
+    # Striaton Gym Pokémon (simplified)
+    "Pansage": {"type":"Grass","base_hp":22,"base_atk":9,"base_def":8,"moves":{"Tackle":{"power":5,"type":"Normal"},"Leafage":{"power":8,"type":"Grass"}}},
+    "Simisage": {"type":"Grass","base_hp":30,"base_atk":13,"base_def":10,"moves":{"Leaf Blade":{"power":12,"type":"Grass"},"Bite":{"power":9,"type":"Dark"}}},
+    "Leavanny": {"type":"Bug","base_hp":28,"base_atk":11,"base_def":11,"moves":{"Razor Leaf":{"power":10,"type":"Grass"},"String Shot":{"power":0,"type":"Bug"}}},
+    "Pansear": {"type":"Fire","base_hp":22,"base_atk":9,"base_def":8,"moves":{"Tackle":{"power":5,"type":"Normal"},"Ember":{"power":7,"type":"Fire"}}},
+    "Simisear": {"type":"Fire","base_hp":30,"base_atk":13,"base_def":10,"moves":{"Fire Punch":{"power":12,"type":"Fire"},"Flame Burst":{"power":10,"type":"Fire"}}},
+    "Darmanitan": {"type":"Fire","base_hp":40,"base_atk":16,"base_def":12,"moves":{"Flare Blitz":{"power":16,"type":"Fire"},"Tackle":{"power":6,"type":"Normal"}}}
+}
+POKEDEX_KEYS = list(POKEDEX.keys())
+
+# ------------------------------
+# Type effectiveness (simple)
+# ------------------------------
+TYPE_EFFECTIVENESS = {
+    "Fire": {"Grass": 2, "Water": 0.5, "Fire": 0.5},
+    "Water": {"Fire": 2, "Grass": 0.5, "Water": 0.5},
+    "Grass": {"Water": 2, "Fire": 0.5, "Grass": 0.5},
+    "Electric": {"Water": 2},
+    "Psychic": {"Dark": 0},
+    "Dark": {"Psychic": 2},
+    "Normal": {}
+}
+
+# ------------------------------
+# Items & shop
+# ------------------------------
+ITEMS = {
+    "Pokeball": {"category":"balls","price":200,"desc":"A standard Poké Ball.","lore":"Catches, contains, comforts."},
+    "Friend Ball": {"category":"balls","price":800,"desc":"Works best on Pokémon that already trust you.","lore":"A gentle capture that asks for consent."},
+    "Ritual Ball": {"category":"balls","price":8000,"desc":"Ceremonial ball for corrupted Pokémon.","lore":"Hums when corruption is near."},
+    "Soft Fruit": {"category":"food","price":40,"desc":"Gentle fruit. Calms many Pokémon.","lore":"A small kindness."},
+    "Spicy Berry": {"category":"food","price":50,"desc":"Favored by Fire-types.","lore":"It burns gently."},
+    "Potion": {"category":"healing","price":300,"desc":"Restores 20 HP.","lore":"Basic medicine."},
+    "Dark Energy Stone": {"category":"stones","price":5000,"desc":"Scarred shard radiating cold void.","lore":"Whispers in the dark."},
+    "Trio Badge": {"category":"badges","price":0,"desc":"A cracked badge once shared by the Striaton trio.","lore":"A reminder of what was lost."}
+}
+POKEMART_ITEMS = {"balls":{}, "food":{}, "healing":{}, "status":{}, "stones":{}, "badges":{}}
+for name,data in ITEMS.items():
+    cat = data["category"]
+    if cat in POKEMART_ITEMS:
+        POKEMART_ITEMS[cat][name] = {"price": data["price"], "desc": data["desc"], "lore": data["lore"]}
+
+# ------------------------------
+# Forage
+# ------------------------------
+FORAGE_AREAS = {"Verdant Trail":{"common":["Soft Fruit"],"rare":["Dark Energy Stone"],"danger":0.25}}
+
+# ------------------------------
+# Dialogues
+# ------------------------------
+CENTER_DIALOGUE_ENTER = ["Welcome... you look exhausted. Let's get your Pokémon patched up."]
+MART_DIALOGUE_ENTER = ["Welcome to the PokéMart. Don't mind the boarded windows."]
+NPC_DIALOGUE = ["They took the research and left the monsters."]
+
+# ------------------------------
+# Core classes
+# ------------------------------
+class Pokemon:
+    def __init__(self, name, level, base_hp, base_atk, base_def, moves, ptype):
+        self.name = name
+        self.level = int(level)
+        self.max_hp = int(base_hp) + self.level * 2
+        self.attack = int(base_atk) + self.level
+        self.defense = int(base_def) + self.level
+        self.current_hp = self.max_hp
+        self.moves = moves.copy()
+        self.type = ptype
+        self.trust = 0
+    def is_fainted(self):
+        return self.current_hp <= 0
+    def heal_full(self):
+        self.current_hp = self.max_hp
+    def calculate_damage(self, move, target):
+        data = self.moves.get(move)
+        if not data:
+            return 1, 1
+        base = data["power"] + self.attack - target.defense
+        eff = TYPE_EFFECTIVENESS.get(data["type"], {}).get(target.type, 1)
+        dmg = max(1, int(base * eff))
+        return dmg, eff
+    def gain_level(self):
+        self.level += 1
+        self.max_hp += 2
+        self.attack += 1
+        self.defense += 1
+        self.current_hp = self.max_hp
+
+class Player:
+    def __init__(self, name):
+        self.name = name
+        self.team = []
+        self.bag = {"food":{"Soft Fruit":2},"balls":{"Pokeball":5,"Friend Ball":1},"healing":{"Potion":2},"status":{},"stones":{},"badges":{}}
+        self.money = 300
+        self.box = []
+        self.last_town = "Nuvema Outpost"
+        self.reputation = {"solace":0,"dominion":0}
+    def add_pokemon(self, pkmn):
+        if len(self.team) < 6:
+            self.team.append(pkmn)
+            print(f"🎉 {pkmn.name} joined your team!")
+        else:
+            self.box.append({"name": pkmn.name, "level": pkmn.level})
+            print(f"Your team is full. {pkmn.name} sent to PC box.")
+    def choose_active(self):
+        healthy = [p for p in self.team if not p.is_fainted()]
+        if not healthy:
+            return None
+        print("\nChoose your active Pokémon:")
+        for i,p in enumerate(healthy,1):
+            print(f"{i}. {p.name} Lv{p.level} ({p.current_hp}/{p.max_hp}) Trust:{p.trust}")
+        while True:
+            c = input("> ").strip()
+            if c == "sv_dev":
+                return "sv_dev"
+            if c.isdigit() and 1 <= int(c) <= len(healthy):
+                return healthy[int(c)-1]
+            print("Invalid selection.")
+    def show_team(self):
+        print("\n=== Your Team ===")
+        if not self.team:
+            print("(No Pokémon)")
+            return
+        for p in self.team:
+            status = " (FNT)" if p.is_fainted() else ""
+            print(f"- {p.name} Lv{p.level} HP {p.current_hp}/{p.max_hp}{status} Trust:{p.trust}")
+    def has_item(self, category, item):
+        return self.bag.get(category,{}).get(item,0) > 0
+    def remove_item(self, category, item, qty=1):
+        if self.has_item(category,item):
+            self.bag[category][item] -= qty
+            if self.bag[category][item] <= 0:
+                del self.bag[category][item]
+            return True
+        return False
+    def add_item(self, category, item, qty=1):
+        self.bag.setdefault(category,{})
+        self.bag[category][item] = self.bag[category].get(item,0) + qty
+    def all_fainted(self):
+        return len(self.team)>0 and all(p.is_fainted() for p in self.team)
+    def to_dict(self):
+        return {"name":self.name,"money":self.money,"bag":self.bag,"team":[{"name":p.name,"level":p.level,"current_hp":p.current_hp,"trust":p.trust} for p in self.team],"box":self.box,"last_town":self.last_town,"reputation":self.reputation}
+    @classmethod
+    def from_dict(cls,data):
+        pl = cls(data.get("name","Trainer"))
+        pl.money = data.get("money",0)
+        pl.bag = data.get("bag",{"food":{},"balls":{},"healing":{},"status":{},"stones":{},"badges":{}})
+        pl.box = data.get("box",[])
+        pl.last_town = data.get("last_town","Nuvema Outpost")
+        pl.reputation = data.get("reputation",{"solace":0,"dominion":0})
+        pl.team = []
+        for td in data.get("team",[]):
+            name = td.get("name")
+            info = POKEDEX.get(name)
+            if info:
+                p = Pokemon(name, td.get("level",5), info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+                p.current_hp = td.get("current_hp", p.max_hp)
+                p.trust = td.get("trust",0)
+                pl.team.append(p)
+        return pl
+
+# ------------------------------
+# Capture & feeding logic (simplified)
+# ------------------------------
+def attempt_catch_with_ball(player: Player, wild: Pokemon, ball_name: str, forced_befriend=False):
+    if forced_befriend:
+        if ball_name != "Friend Ball":
+            print("This Pokémon doesn’t want to be captured by force. Try a Friend Ball instead.")
+            return False, False, None
+        if not player.remove_item("balls", ball_name, 1):
+            print("You don't have that ball.")
+            return False, False, None
+        print("You gently toss the Friend Ball...")
+        print(f"{wild.name} touches it softly — and vanishes inside without resistance.")
+        player.add_pokemon(wild)
+        player.reputation["solace"] += 1
+        return True, True, "friend"
+    # Corrupted-Sylveon special: balls bounce off
+    if "Corrupted" in wild.name or wild.name.endswith("_Corrupted") or wild.name.endswith("Corrupted") or wild.name == "Sylveon_Corrupted":
+        if ball_name != "Ritual Ball":
+            print("The Pokéball fails — it bounces off the strange aura. Ordinary balls won't hold this creature.")
+            return False, False, None
+        # Ritual Ball attempt
+        if not player.remove_item("balls", ball_name, 1):
+            print("You don't have that ball.")
+            return False, False, None
+        chance = 0.60
+        roll = random.random()
+        print(f"(Ritual catch roll: {roll:.2f} <= {chance:.2f})")
+        if roll <= chance:
+            print(f"You captured the corrupted {wild.name} with the Ritual Ball!")
+            player.add_pokemon(wild)
+            player.reputation["dominion"] += 1
+            return True, True, "ritual"
+        else:
+            print("The Ritual Ball failed... the corruption recoils.")
+            wild.trust = max(0, wild.trust - 5)
+            return True, False, None
+
+    base = max(0.01, (1 - wild.current_hp / wild.max_hp) * 0.6)
+    trust_factor = min(0.5, wild.trust / 200.0)
+    ball_mods = {"Pokeball":0.1,"Friend Ball":0.15}
+    mod = ball_mods.get(ball_name,0.0)
+    chance = base + trust_factor + mod
+    chance = min(chance,0.95)
+    roll = random.random()
+    print(f"(Catch roll: {roll:.2f} <= {chance:.2f})")
+    if not player.remove_item("balls", ball_name, 1):
+        print("You don't have that ball.")
+        return False, False, None
+    if roll <= chance:
+        print(f"You caught {wild.name}!")
+        player.add_pokemon(wild)
+        player.reputation["dominion"] += 1
+        return True, True, "normal"
+    else:
+        wild.trust = max(0, wild.trust - 5)
+        return True, False, None
+
+FOOD_PREF = {"Fire":"Spicy Berry","Water":"Soft Fruit","Grass":"Soft Fruit","Normal":"Soft Fruit","Fairy":"Soft Fruit"}
+def use_food_on_wild(player: Player, wild: Pokemon, food_name: str, calming_effects=None):
+    pref = FOOD_PREF.get(wild.type, None)
+    if food_name == pref:
+        gain = 20
+        wild.trust = min(100, wild.trust + gain)
+        print(f"{wild.name} eagerly eats the {food_name}! Trust +{gain}.")
+        player.reputation["solace"] += 1
+    else:
+        wild.trust = min(100, wild.trust + 5)
+        print(f"{wild.name} eats the {food_name}. Trust +5.")
+    player.remove_item("food", food_name, 1)
+
+# ------------------------------
+# Battle loop (single-opponent)
+# ------------------------------
+def battle_loop(game, player: Player, active: Pokemon, opponent: Pokemon, trainer_name=None, tutorial=False):
+    forced_befriend = False
+    battle_type = "trainer" if trainer_name else "wild"
+    if trainer_name:
+        print(f"⚔️ Trainer {trainer_name} challenges you!")
+    else:
+        print(f"⚔️ A wild {opponent.name} appears!")
+    while True:
+        if battle_type=="wild" and opponent.trust >= TRUST_THRESHOLD and not forced_befriend:
+            print(f"\n{opponent.name} lowers its tense stance and takes a few steps closer to you, the will to fight gone.")
+            forced_befriend = True
+
+        if active.is_fainted():
+            if player.all_fainted():
+                print("\nAll your Pokémon have fainted!")
+                print("You run back to the Pokémon Center, your Pokéballs in your hands, protecting them from further harm.")
+                game.respawn_player()
+                return "fainted"
+            else:
+                print(f"{active.name} has fainted. Choose another Pokémon.")
+                chosen = player.choose_active()
+                if chosen == "sv_dev":
+                    dev_menu(game); continue
+                if chosen is None:
+                    game.respawn_player(); return "fainted"
+                active = chosen
+
+        if opponent.is_fainted():
+            print(f"{opponent.name} fainted!")
+            active.gain_level()
+            print(f"✨ {active.name} grew to Lv.{active.level}!")
+            reward = 25 if trainer_name else 5
+            player.money += reward
+            print(f"💵 You earned ${reward}!")
+            return "win"
+
+        print(f"\n{active.name} HP: {active.current_hp}/{active.max_hp} | {opponent.name} HP: {opponent.current_hp}/{opponent.max_hp} | Trust: {opponent.trust}")
+        if forced_befriend:
+            print("Actions: 1) Bag")
+            cmd = input("> ").strip()
+            if cmd == "sv_dev":
+                dev_menu(game); continue
+            if cmd != "1":
+                print("Invalid. You can only open your Bag right now.")
+                continue
+            balls = player.bag.get("balls",{})
+            if not balls:
+                print("You have no balls to use.")
+                continue
+            ball_list = list(balls.items())
+            for i,(bname,qty) in enumerate(ball_list,1):
+                print(f"{i}. {bname} x{qty}")
+            sel = input("> ").strip()
+            if sel == "sv_dev":
+                dev_menu(game); continue
+            if not sel.isdigit() or not (1 <= int(sel) <= len(ball_list)):
+                print("Cancelled."); continue
+            chosen_ball = ball_list[int(sel)-1][0]
+            consumed, caught, method = attempt_catch_with_ball(player, opponent, chosen_ball, forced_befriend=True)
+            if caught and method == "friend":
+                return "befriended"
+            else:
+                continue
+        else:
+            print("Actions: 1) Fight  2) Bag  3) Run")
+            cmd = input("> ").strip()
+            if cmd == "sv_dev":
+                dev_menu(game); continue
+            if cmd == "1":
+                moves = list(active.moves.keys())
+                print("\nChoose a move (number or name):")
+                for i,m in enumerate(moves,1):
+                    print(f"{i}. {m} (Power {active.moves[m]['power']}, Type {active.moves[m]['type']})")
+                sel = input("> ").strip()
+                if sel == "sv_dev":
+                    dev_menu(game); continue
+                move_name = None
+                if sel.isdigit():
+                    idx = int(sel)-1
+                    if 0 <= idx < len(moves):
+                        move_name = moves[idx]
+                    else:
+                        print("Invalid move."); continue
+                else:
+                    s = sel.strip().lower()
+                    for m in moves:
+                        if s == m.lower() or s in m.lower():
+                            move_name = m; break
+                    if not move_name:
+                        print("Invalid move."); continue
+                dmg,eff = active.calculate_damage(move_name, opponent)
+                opponent.current_hp = max(0, opponent.current_hp - dmg)
+                msg = " Super effective!" if eff>1 else " Not very effective..." if eff<1 else ""
+                print(f"{active.name} used {move_name}! {dmg} dmg.{msg}")
+            elif cmd == "2":
+                # Bag usage in battle
+                print("\nBag Categories:")
+                categories = ["food","balls","healing","status","stones"]
+                for i,cat in enumerate(categories,1):
+                    print(f"{i}. {cat.title()}")
+                choice = input("> ").strip()
+                if choice == "sv_dev":
+                    dev_menu(game); continue
+                if not choice.isdigit() or not (1 <= int(choice) <= len(categories)):
+                    print("Cancelled."); continue
+                cat = categories[int(choice)-1]
+                items = player.bag.get(cat,{})
+                if not items:
+                    print("Nothing in that category."); continue
+                item_list = list(items.items())
+                for i,(name,qty) in enumerate(item_list,1):
+                    print(f"{i}. {name} x{qty} - {ITEMS.get(name,{}).get('desc','')}")
+                sel = input("> ").strip()
+                if sel == "sv_dev":
+                    dev_menu(game); continue
+                if not sel.isdigit() or not (1 <= int(sel) <= len(item_list)):
+                    print("Cancelled."); continue
+                item_name = item_list[int(sel)-1][0]
+                print(f"\n{item_name}: 1) Use  2) Examine  3) Back")
+                sub = input("> ").strip()
+                if sub == "sv_dev":
+                    dev_menu(game); continue
+                if sub == "2":
+                    print(f"Examine: {ITEMS.get(item_name,{}).get('lore','No info.')}")
+                    continue
+                if sub != "1":
+                    continue
+                if cat == "food":
+                    if battle_type == "trainer":
+                        print("You can’t use food on someone else’s Pokémon."); continue
+                    use_food_on_wild(player, opponent, item_name)
+                elif cat == "balls":
+                    consumed,caught,method = attempt_catch_with_ball(player, opponent, item_name)
+                    if caught:
+                        if tutorial and method != "friend":
+                            return "caught_force"
+                        else:
+                            return "caught"
+                else:
+                    print("Not implemented here.")
+            elif cmd == "3":
+                if battle_type == "trainer":
+                    print("You can't run from a trainer battle!")
+                else:
+                    if random.random() < 0.7:
+                        print("You ran away safely."); return "ran"
+                    else:
+                        print("Couldn't get away!")
+            else:
+                print("Invalid action.")
+
+        # opponent turn
+        if not opponent.is_fainted():
+            move = random.choice(list(opponent.moves.keys()))
+            dmg,eff = opponent.calculate_damage(move, active)
+            active.current_hp = max(0, active.current_hp - dmg)
+            print(f"The {opponent.name} used {move}! {dmg} dmg.")
+            if active.is_fainted():
+                print(f"{active.name} fainted!")
+
+# ------------------------------
+# Forage (simple)
+# ------------------------------
+def forage_area(player: Player, area_name: str):
+    area = FORAGE_AREAS.get(area_name)
+    if not area:
+        print("You can't forage here."); return
+    print(f"\n🌲 You begin foraging in the {area_name}...")
+    time.sleep(0.8)
+    roll = random.random()
+    if roll < area["danger"]:
+        print("🐾 Danger! A wild Pokémon ambushes you!")
+        species = random.choice(POKEDEX_KEYS)
+        info = POKEDEX[species]
+        wild = Pokemon(species, random.randint(2,5), info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+        active = player.choose_active()
+        if active == "sv_dev":
+            dev_menu(Game.instance); return
+        if active:
+            res = battle_loop(Game.instance, player, active, wild)
+            if res in ("win","caught","befriended"):
+                print("You survived the ambush.")
+        else:
+            print("You have no healthy Pokémon to defend you. You run back to town.")
+            return
+    else:
+        found = random.choice(area["common"])
+        cat = ITEMS.get(found,{}).get("category","food")
+        player.add_item(cat, found, 1)
+        print(f"🍎 You found: {found} (added to {cat.title()}).")
+
+# ------------------------------
+# World & Locations (add Striaton Town with gym event)
+# ------------------------------
+class Location:
+    def __init__(self, name, desc, conn, events):
+        self.name = name
+        self.desc = desc
+        self.conn = conn
+        self.events = events
+
+class World:
+    def __init__(self, game):
+        self.game = game
+        self.locations = self.create_locations()
+        self.current = self.locations["Nuvema Outpost"]
+        self.trainers_defeated = set()
+        self.last_town = "Nuvema Outpost"
+    def create_locations(self):
+        return {
+            "Nuvema Outpost": Location("Nuvema Outpost","A battered outpost; the center provides the only steady power.",{"north":"Verdant Trail"},["pokecenter","pokemart"]),
+            "Verdant Trail": Location("Verdant Trail","Overgrown path. Good for foraging.",{"south":"Nuvema Outpost","north":"Ruined Park","east":"Accumula Town"},["wild_encounter"]),
+            "Ruined Park": Location("Ruined Park","Rusting rides and broken benches.",{"south":"Verdant Trail","north":"Scorched Forest"},["wild_encounter","forage_spot"]),
+            "Accumula Town": Location("Accumula Town","A once-proud town, now a dim hub of survivors. Elara's lab hides among the ruins.",{"west":"Verdant Trail","east":"Route 2","north":"Striaton Town"},["pokecenter","pokemart","elara_lab"]),
+            "Route 2": Location("Route 2","A cracked route — good place to learn.",{"west":"Accumula Town","east":"Route 3"},["wild_encounter"]),
+            "Route 3": Location("Route 3","A wide, scarred route where the earth sometimes seems to thrum. Locals whisper about 'shadows'.",{"west":"Route 2","south":"Striaton Town"},["wild_encounter"]),
+            "Striaton Town": Location("Striaton Town","A ruined town with a damaged café-like Gym. Survivors keep a watchful eye.",{"south":"Route 3","west":"Accumula Town"},["pokecenter","pokemart","striaton_arrival","striaton_gym"])
+        }
+    def describe(self):
+        print(f"\n📍 {self.current.name} — {self.current.desc}")
+        if self.current.conn:
+            print("Paths:")
+            for d,t in self.current.conn.items():
+                print(f"- {d.title()} → {t}")
+    def move(self):
+        self.describe()
+        dest = input("> ").strip().lower()
+        if dest == "sv_dev":
+            dev_menu(self.game); return
+        if dest in self.current.conn:
+            self.current = self.locations[self.current.conn[dest]]
+            if "pokecenter" in self.current.events or "pokemart" in self.current.events:
+                self.last_town = self.current.name
+                self.game.player.last_town = self.current.name
+            print(f"\n➡️ You travel {dest} to {self.current.name}...")
+            self.trigger_events_on_entry()
+        else:
+            print("You can't go that way.")
+    def trigger_events_on_entry(self):
+        for e in self.current.events:
+            if e == "wild_encounter":
+                if random.random() < 0.5:
+                    species = random.choice(list(POKEDEX.keys()))
+                    info = POKEDEX[species]
+                    wild = Pokemon(species, random.randint(2,5), info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+                    print(f"🌿 A wild {wild.name} stirs nearby...")
+                    active = self.game.player.choose_active()
+                    if active == "sv_dev":
+                        dev_menu(self.game); return
+                    if active:
+                        battle_loop(self.game, self.game.player, active, wild)
+            if e == "forage_spot":
+                pass
+            if e == "striaton_arrival":
+                # play the arrival scene (only once)
+                if not story_flags.get("striaton_arrived"):
+                    striaton_arrival(self.game)
+            if e == "striaton_gym":
+                # show gym menu if in town
+                pass
+        if any(ev in ("pokecenter","pokemart","elara_lab") for ev in self.current.events):
+            self.town_menu()
+    def town_menu(self):
+        while True:
+            print(f"\n🏙 You are in {self.current.name}. What would you like to do?")
+            print_line_index = 1
+            menu_map = {}
+            if "pokecenter" in self.current.events:
+                print(f"{print_line_index}. Visit PokéCenter"); menu_map[str(print_line_index)] = "pokecenter"; print_line_index += 1
+            if "pokemart" in self.current.events:
+                print(f"{print_line_index}. Visit PokéMart"); menu_map[str(print_line_index)] = "pokemart"; print_line_index += 1
+            if "striaton_gym" in self.current.events:
+                print(f"{print_line_index}. Enter the Gym Hall"); menu_map[str(print_line_index)] = "striaton_gym"; print_line_index += 1
+            print(f"{print_line_index}. Forage"); menu_map[str(print_line_index)] = "forage"; print_line_index += 1
+            print(f"{print_line_index}. Talk"); menu_map[str(print_line_index)] = "talk"; print_line_index += 1
+            print(f"{print_line_index}. Journal"); menu_map[str(print_line_index)] = "journal"; print_line_index += 1
+            print(f"{print_line_index}. Leave"); menu_map[str(print_line_index)] = "leave"
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self.game); continue
+            choice = menu_map.get(c)
+            if choice == "pokecenter":
+                self.event("pokecenter")
+            elif choice == "pokemart":
+                self.event("pokemart")
+            elif choice == "striaton_gym":
+                self.event("striaton_gym")
+            elif choice == "forage":
+                area = self.current.name
+                if area in FORAGE_AREAS:
+                    forage_area(self.game.player, area)
+                else:
+                    print("There's nowhere safe to forage here.")
+            elif choice == "talk":
+                print("\nYou look around and speak to a passerby...")
+                print(f"🗣️ \"{random.choice(NPC_DIALOGUE)}\"")
+            elif choice == "journal":
+                self.game.open_journal()
+            elif choice == "leave":
+                print("You step out of town."); break
+            else:
+                print("Invalid.")
+    def event(self, e):
+        if e == "pokecenter":
+            print("\n🏥 Nurse Joy: '" + random.choice(CENTER_DIALOGUE_ENTER) + "'")
+            for p in self.game.player.team:
+                p.heal_full()
+            print("Your Pokémon have been healed.")
+            add_journal(f"Healed at {self.current.name} Pokémon Center.")
+        elif e == "pokemart":
+            print("\n🛍️ Clerk: '" + random.choice(MART_DIALOGUE_ENTER) + "'")
+            self.pokemart_menu()
+            add_journal(f"Visited PokéMart in {self.current.name}.")
+        elif e == "elara_lab":
+            # If not met, play the first-meeting chain
+            if not story_flags.get("met_elara_in_person"):
+                elara_lab_first_meeting(self.game)
+            else:
+                if story_flags.get("friend_tutorial_started") and not story_flags.get("friend_tutorial_complete"):
+                    print("\n🔬 Elara looks up from a console. \"You should try befriending one on Route 2. I showed you how.\"")
+                else:
+                    print("\n🔬 You enter Elara's lab. Shelves of battered notebooks and jars line the walls.")
+                    print('Elara: "Back again. Keep your partner close; there are answers ahead."')
+                    if story_flags.get("friend_tutorial_complete") and not story_flags.get("quest_route3_started"):
+                        time.sleep(0.4)
+                        elara_next_quest(self.game)
+        elif e == "striaton_arrival":
+            # handled when entering
+            pass
+        elif e == "striaton_gym":
+            # Open gym hall and process the gym sequence
+            striaton_gym_sequence(self.game)
+        else:
+            print("Nothing happens.")
+    def pokemart_menu(self):
+        while True:
+            print(f"\n💰 Welcome to the PokéMart. You have ${self.game.player.money}.")
+            print("1) Buy  2) Sell Foraged  3) Talk  4) Leave")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self.game); continue
+            if c == "1":
+                while True:
+                    print("\nCategories: 1) Balls  2) Food  3) Healing  4) Back")
+                    cat_choice = input("> ").strip()
+                    if cat_choice == "sv_dev":
+                        dev_menu(self.game); continue
+                    cats = {"1":"balls","2":"food","3":"healing"}
+                    if cat_choice == "4":
+                        break
+                    if cat_choice not in cats:
+                        print("Invalid."); continue
+                    cat = cats[cat_choice]
+                    items = POKEMART_ITEMS.get(cat,{})
+                    if not items:
+                        print("No items in this category."); continue
+                    for i,(name,data) in enumerate(items.items(),1):
+                        print(f"{i}. {name} - ${data['price']}\n   {data['desc']}")
+                    sel = input("\nEnter number to view or Enter to cancel: ").strip()
+                    if sel == "sv_dev":
+                        dev_menu(self.game); continue
+                    if not sel:
+                        continue
+                    if not sel.isdigit() or not (1 <= int(sel) <= len(items)):
+                        print("Invalid."); continue
+                    item_name = list(items.keys())[int(sel)-1]
+                    item_data = items[item_name]
+                    print(f"\n{item_name}: 1) Buy  2) Ask about  3) Back")
+                    a = input("> ").strip()
+                    if a == "sv_dev":
+                        dev_menu(self.game); continue
+                    if a == "2":
+                        print(f"🗣️ Clerk: \"{item_data.get('lore','No info available.')}\""); continue
+                    if a != "1":
+                        continue
+                    print(f"Buy {item_name} for ${item_data['price']}? (y/n)")
+                    if input("> ").strip().lower() == "y":
+                        if self.game.player.money >= item_data['price']:
+                            self.game.player.money -= item_data['price']
+                            category = ITEMS[item_name]["category"]
+                            self.game.player.add_item(category, item_name, 1)
+                            print("Stay alive out there.")
+                        else:
+                            print("You don't have enough money.")
+            elif c == "2":
+                foods = self.game.player.bag.get("food",{})
+                if not foods:
+                    print("You have no foraged food to sell."); continue
+                print("Your foraged foods:")
+                items = list(foods.items())
+                for i,(name,qty) in enumerate(items,1):
+                    sell_price = 25
+                    print(f"{i}. {name} x{qty} (Sell for ${sell_price} each)")
+                sel = input("Enter number to sell one (or Enter to cancel): ").strip()
+                if sel == "sv_dev":
+                    dev_menu(self.game); continue
+                if not sel:
+                    continue
+                if not sel.isdigit() or not (1 <= int(sel) <= len(items)):
+                    print("Invalid."); continue
+                item_name = items[int(sel)-1][0]
+                if self.game.player.remove_item("food", item_name, 1):
+                    self.game.player.money += 25
+                    print(f"Sold one {item_name} for $25.")
+            elif c == "3":
+                print("\n🗣️ Clerk: \"" + random.choice(NPC_DIALOGUE) + "\"")
+            elif c == "4":
+                print("🛒 Clerk: 'Come back anytime.'"); break
+            else:
+                print("Invalid.")
+
+# ------------------------------
+# Cutscenes & Quest chain: Elara -> Route3 -> Striaton
+# ------------------------------
+def play_cutscene(name, game):
+    scenes = {"intro_confrontation": intro_confrontation_scene}
+    fn = scenes.get(name)
+    if fn:
+        fn(game)
+
+def intro_confrontation_scene(game):
+    if story_flags.get("intro_scene_complete"):
+        return
+    player = game.player
+    print("\nAs you step out of the Pokémon Center, the wind carries the sound of shouting...")
+    time.sleep(0.8)
+    print("Marshal Dorian, a man in a dark uniform, stands with a clenched Poké Ball.")
+    time.sleep(0.6)
+    print('"Submit," he growls. "This is mercy. Humanity must reclaim control."')
+    time.sleep(0.6)
+    print("A woman steps between them — Elara of Team Solace. She stands firm.")
+    time.sleep(0.6)
+    print('"We believe in trust," she says. "Not chains."')
+    time.sleep(0.6)
+    print("Dorian sneers and walks off into the fog. Elara turns to you.")
+    time.sleep(0.6)
+    print('"Meet me at my lab in Accumula Town if you want answers," she says quietly.')
+    add_journal("You witnessed a clash between Team Dominion and Team Solace; Elara asked you to meet her in Accumula Town.")
+    story_flags["intro_scene_complete"] = True
+    story_flags["next_objective"] = "Meet Elara at her lab in Accumula Town"
+    player.reputation["solace"] = player.reputation.get("solace",0) + 2
+
+def elara_lab_first_meeting(game):
+    player = game.player
+    print("\n🔬 You step inside Elara’s lab. The faint buzz of old machinery fills the air.")
+    time.sleep(0.6)
+    print('"You made it," she says. "Good."')
+    time.sleep(0.5)
+    print('"These are Friend Balls. They invite, not force."')
+    time.sleep(0.4)
+    print("\n🎁 Elara gives you 5 Friend Balls and 5 Soft Fruit.")
+    player.add_item("balls","Friend Ball",5)
+    player.add_item("food","Soft Fruit",5)
+    add_journal("You met Elara in her lab and received Friend Balls and food.")
+    story_flags["received_friend_balls"] = True
+    time.sleep(0.6)
+    print('"Come with me," she says. "I will show you on Route 2."')
+    time.sleep(0.6)
+    # move player to Route 2 for demo
+    if "Route 2" in game.world.locations:
+        game.world.current = game.world.locations["Route 2"]
+    print("\n🌲 [You follow Elara to Route 2...]")
+    time.sleep(0.8)
+    print("A timid Patrat scurries by. Elara demonstrates: she feeds it, waits, then uses a Friend Ball.")
+    time.sleep(0.6)
+    print("The Patrat joins her without a fight.")
+    time.sleep(0.6)
+    print('\n"Your turn," Elara says. "Try feeding one yourself."')
+    story_flags["met_elara_in_person"] = True
+    story_flags["friend_tutorial_started"] = True
+    story_flags["friend_tutorial_complete"] = False
+    story_flags["next_objective"] = "Befriend a Pokémon on Route 2."
+    add_journal("Elara demonstrated befriending on Route 2. Try it yourself.")
+    # auto-trigger tutorial encounter
+    print("\n⚡ A wild Patrat appears right in front of you! Elara steps back to watch.")
+    time.sleep(0.5)
+    info = POKEDEX.get("Patrat")
+    if info:
+        wild = Pokemon("Patrat",4,info["base_hp"],info["base_atk"],info["base_def"],info["moves"],info["type"])
+    else:
+        wild = Pokemon("Patrat",4,22,8,7,{"Tackle":{"power":5,"type":"Normal"},"Bite":{"power":8,"type":"Dark"}},"Normal")
+    active = player.choose_active()
+    if active == "sv_dev":
+        dev_menu(game)
+        active = player.choose_active()
+    if not active:
+        print("You have no healthy Pokémon to do this with. Elara helps you return.")
+        game.world.current = game.world.locations.get("Accumula Town", game.world.current)
+        return
+    result = battle_loop(game, player, active, wild, trainer_name=None, tutorial=True)
+    if result == "befriended":
+        elara_post_befriend(game)
+    else:
+        elara_post_failure(game)
+
+def elara_post_befriend(game):
+    print("\n🌤 You return to Elara’s lab. She smiles softly.")
+    time.sleep(0.4)
+    print('"You did it," she says. "You earned its trust."')
+    add_journal("You befriended a Patrat as Elara taught you. Elara praised you.")
+    game.player.reputation["solace"] = game.player.reputation.get("solace",0) + 10
+    story_flags["friend_tutorial_complete"] = True
+    story_flags["next_objective"] = "Speak with Elara about what comes next."
+    # immediately start the next quest chain (Elara -> Marshal -> Route 3)
+    time.sleep(0.6)
+    elara_next_quest(game)
+
+def elara_post_failure(game):
+    print("\n🌫 You return to Elara’s lab. She looks disappointed.")
+    time.sleep(0.4)
+    print('"So... that’s how you chose to do it."')
+    add_journal("You failed Elara's befriending lesson (captured or fought). She was disappointed.")
+    game.player.reputation["dominion"] = game.player.reputation.get("dominion",0) + 10
+    story_flags["friend_tutorial_complete"] = True
+    story_flags["next_objective"] = "Reflect on Elara’s disappointment before continuing your journey."
+    # still issue the quest, just with different tone
+    time.sleep(0.6)
+    elara_next_quest(game)
+
+def elara_next_quest(game):
+    """
+    Elara issues the Route 3 investigation quest and — as you leave the lab — Marshal appears to warn you.
+    Then the player finds the corrupted Sylveon scene on Route 3.
+    """
+    if story_flags.get("quest_route3_started"):
+        return
+    print("\nElara folds her hands, eyes on a flickering screen. \"There are strange signals on Route 3,\" she says.")
+    time.sleep(0.6)
+    print('"Pokémon disappearing. Residual energy signatures like nothing I’ve mapped before."')
+    time.sleep(0.6)
+    print('"I want you to go. Look for anything that feels off — and come back to me with what you find."')
+    add_journal("Elara detected strange signals near Route 3 and asked you to investigate.")
+    story_flags["quest_route3_started"] = True
+    story_flags["next_objective"] = "Investigate strange activity on Route 3."
+    # move player to Accumula Town (we're in lab)
+    if "Accumula Town" in game.world.locations:
+        game.world.current = game.world.locations["Accumula Town"]
+    time.sleep(0.6)
+    print("\nYou step outside Elara's lab — Marshal is leaning by the road, waiting.")
+    # marshal encounter
+    route3_marshal_encounter(game)
+    # after marshal, proceed toward Route 3 and trigger corrupted scene
+    time.sleep(0.6)
+    print("\nYou head toward Route 3 to investigate the signals...")
+    # set location and trigger the corrupted scene
+    if "Route 3" in game.world.locations:
+        game.world.current = game.world.locations["Route 3"]
+    route3_corrupted_scene(game)
+
+def route3_marshal_encounter(game):
+    """
+    Marshal appears outside Elara's lab and explains Dominion's position.
+    """
+    if story_flags.get("marshal_met_route3"):
+        return
+    print("\nA tall man in a dark, evenly-cut coat leans against a crumbling fence. Marshal Dorian.")
+    time.sleep(0.6)
+    print('He looks at you with eyes that have seen too many ends. "So, Elara sent you," he says quietly.')
+    time.sleep(0.6)
+    print('"You think feeding and talking will fix everything? When the corruption comes, those choices can leave people dead."')
+    time.sleep(0.6)
+    print('"Dominion acts to protect the survivors. Order is sometimes the only mercy."')
+    time.sleep(0.6)
+    print('He studies you a moment. "If you find something on Route 3... be careful. This is not a simple job."')
+    add_journal("Marshal appeared and warned you about what may be on Route 3.")
+    story_flags["marshal_met_route3"] = True
+
+def route3_corrupted_scene(game):
+    """
+    The player witnesses two Dominion grunts failing to capture a corrupted Sylveon.
+    Pokéballs bounce off; the creature's ribbons are replaced by tendrils (shadowy).
+    Then there's a tattered field note you can interact with.
+    """
+    if story_flags.get("sylveon_scene_seen"):
+        # If already seen, allow searching for note if not yet taken
+        if not story_flags.get("route3_note_taken"):
+            route3_note_interaction(game)
+        return
+    print("\nThe air thins as you step into a hollow field on Route 3. Mist hangs in clumps.")
+    time.sleep(0.8)
+    print("Voices crack ahead — panicked, clipped orders.")
+    time.sleep(0.5)
+    print('\nDominion Grunt 1: "It’s— it’s not holding still! Just throw another ball!"')
+    time.sleep(0.6)
+    print('Dominion Grunt 2: "I already tried! They just bounce off! It’s like— it’s rejecting capture!"')
+    time.sleep(0.7)
+    print("\nYou move closer and see why. A Sylveon-like creature watches the grunts with hollow eyes.")
+    time.sleep(0.8)
+    # descriptive, eerie tendrils (safe, not graphic)
+    print("Where soft ribbons should have fluttered, a cluster of shadowy tendrils writhes gently — alive with a strange darkness.")
+    time.sleep(0.8)
+    print("A thrown Pokéball arcs toward the creature — it taps the tendrils and skitters off, useless.")
+    time.sleep(0.8)
+    print('\nDominion Grunt 1: "Bring it in alive! The report said—"')
+    time.sleep(0.6)
+    print('Dominion Grunt 2 (panicking): "I can’t. It’s like the ball hits a wall and bounces off!"')
+    time.sleep(0.7)
+    print("The corrupted creature lets out a sound that isn’t quite a cry — layered and warped.")
+    time.sleep(0.8)
+    print("The grunts drop a cracked Pokéball and run, tripping through the mist.")
+    time.sleep(0.6)
+    print('Marshal’s voice from earlier lingers in your mind: "When you see what’s waiting on Route 3… you’ll understand."')
+    time.sleep(0.6)
+    print("\nFor a moment the Sylveon stares straight at you. The tendrils fall still, as if listening.")
+    time.sleep(0.8)
+    print("It turns and steps into the mist, the shadows swallowing its form until there is only silence.")
+    add_journal("You witnessed Dominion grunts failing to capture a corrupted Sylveon on Route 3. Its tendrils repelled their Pokéballs.")
+    story_flags["sylveon_scene_seen"] = True
+    story_flags["quest_route3_progress"] = "Investigate the corruption further"
+    story_flags["next_objective"] = "Search Route 3 for clues to the corrupted Pokémon."
+    # now present the tattered field note nearby
+    time.sleep(0.6)
+    route3_note_interaction(game)
+
+def route3_note_interaction(game):
+    """
+    Interaction with the tattered field note found on Route 3.
+    Gives player options to read & keep, destroy, or leave it.
+    Reading adds journal entry; choices affect reputation.
+    """
+    if story_flags.get("route3_note_taken"):
+        return
+    print("\nSomething flutters at your feet — a tattered field note, half-buried in the mud.")
+    time.sleep(0.5)
+    while True:
+        print("\nWhat do you do with the note?")
+        print("1) Read and keep it")
+        print("2) Destroy it")
+        print("3) Leave it")
+        c = input("> ").strip()
+        if c == "sv_dev":
+            dev_menu(game); continue
+        if c == "1":
+            note_text = (
+                "—Day 12—\n"
+                "The shadows are spreading faster now. Pokémon no longer flee; they watch.\n"
+                "We thought the corruption was confined to the ruins, but last night even the moonlight bent around the shapes in the mist.\n"
+                "Their cries sound familiar, but wrong… like echoes from dreams that should’ve stayed forgotten.\n"
+                "— Unidentified Researcher"
+            )
+            print("\nYou carefully fold the note and slip it into your pack.")
+            add_journal("You found a tattered field note about corrupted Pokémon on Route 3:\n" + note_text)
+            # reputation small positive for Solace approach
+            game.player.reputation["solace"] += 1
+            print("Solace reputation +1.")
+            story_flags["route3_note_taken"] = True
+            break
+        elif c == "2":
+            print("\nYou tear the note and drop the pieces into the mud. Maybe some secrets are too dangerous to spread.")
+            add_journal("You destroyed a field note about corrupted Pokémon on Route 3.")
+            game.player.reputation["dominion"] += 1
+            print("Dominion reputation +1.")
+            story_flags["route3_note_taken"] = True
+            break
+        elif c == "3":
+            print("\nYou leave the note where it lies, half-hidden in the mist.")
+            break
+        else:
+            print("Invalid.")
+
+# ------------------------------
+# Striaton arrival + Gym sequence (v1.6 storytime)
+# ------------------------------
+def striaton_arrival(game):
+    """
+    Arrival scene in Striaton Town: Elara greets you, asks you to meet the Gym Leader.
+    This plays once when first arriving at Striaton Town after Route 3 sequence.
+    """
+    if story_flags.get("striaton_arrived"):
+        return
+    print("\nYou step into what remains of Striaton Town.")
+    time.sleep(1.0)
+    print("Once bright streets are now lined with makeshift lanterns and cracked stone paths.")
+    time.sleep(1.0)
+    print("Survivors murmur quietly near the Pokémon Center.")
+    time.sleep(1.0)
+    print("\nElara spots you from across the square and waves, relief softening her features.")
+    time.sleep(1.0)
+    print('"You made it through Route 3! I was starting to worry," she says, smiling faintly.')
+    time.sleep(1.0)
+    print('"The corruption’s spreading faster than we thought… but Striaton’s holding strong."')
+    time.sleep(1.2)
+    print('"If you’re ready, I want you to meet the Gym Leader here. She’s testing trainers who still believe in partnership."')
+    time.sleep(1.2)
+    print('"Win—or at least try—and show them hope isn’t gone yet."')
+    add_journal("Elara greeted you in Striaton Town and asked you to face the Striaton Gym Leader.")
+    story_flags['striaton_unlocked'] = True
+    story_flags['striaton_arrived'] = True
+    story_flags['next_objective'] = "Challenge the Striaton Gym Leader to prove partnership still matters."
+
+def striaton_gym_sequence(game):
+    """
+    The Shattered Duo: Cilan & Chili fight together. Implemented as two sequential trainer battles for compatibility.
+    Emotional cutscenes included.
+    """
+    if story_flags.get("striaton_gym_cleared"):
+        print("\nThe Gym is quiet. Cilan and Chili watch from the back, their faces tired.")
+        return
+
+    print("\nYou enter the Gym Hall. The restaurant is in disrepair — overturned tables, ash-stained curtains.")
+    time.sleep(1.0)
+    print("Two figures stand waiting: a man with a calm, hollow air (Cilan), and another with a restless glare (Chili).")
+    time.sleep(1.0)
+    print('\nCilan (softly): "A visitor. We don’t get many. Are you one of Elara’s hopefuls?"')
+    time.sleep(1.0)
+    print('\nChili (barks): "Hopefuls... hope got us burned, but if you want a badge—fight us. Show us your heart."')
+    time.sleep(1.0)
+    print('\nCilan: "We will fight together—not to win a prize, but to remember what part of us still cares."')
+    add_journal("You entered the Striaton Gym and met Cilan and Chili — they challenged you together.")
+    time.sleep(1.0)
+
+    # Trainer 1: Cilan (3 Pokémon)
+    cilan_team = [
+        ("Pansage", 7),
+        ("Simisage", 9),
+        ("Leavanny", 10)
+    ]
+    print("\nCilan steps forward to battle. His voice is soft, but firm.")
+    time.sleep(0.6)
+    for species, lvl in cilan_team:
+        info = POKEDEX.get(species)
+        wild = Pokemon(species, lvl, info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+        active = game.player.choose_active()
+        if active == "sv_dev":
+            dev_menu(game)
+            active = game.player.choose_active()
+        if not active:
+            print("You have no healthy Pokémon. The gym trainers look on solemnly.")
+            return
+        res = battle_loop(game, game.player, active, wild, trainer_name="Cilan")
+        if res == "fainted":
+            print("You were forced to retreat from the Gym. Heal and return.")
+            return
+    print("\nCilan breathes out, nodding. \"You fought well.\"")
+    time.sleep(0.8)
+
+    # Trainer 2: Chili (3 Pokémon)
+    chili_team = [
+        ("Pansear", 7),
+        ("Simisear", 9),
+        ("Darmanitan", 11)
+    ]
+    print("\nChili steps forward, hands clenched. His voice shakes, but he speaks with force.")
+    time.sleep(0.6)
+    for species, lvl in chili_team:
+        info = POKEDEX.get(species)
+        wild = Pokemon(species, lvl, info["base_hp"], info["base_atk"], info["base_def"], info["moves"], info["type"])
+        active = game.player.choose_active()
+        if active == "sv_dev":
+            dev_menu(game)
+            active = game.player.choose_active()
+        if not active:
+            print("You have no healthy Pokémon. The gym trainers look on solemnly.")
+            return
+        res = battle_loop(game, game.player, active, wild, trainer_name="Chili")
+        if res == "fainted":
+            print("You were forced to retreat from the Gym. Heal and return.")
+            return
+    # Victory
+    print("\nChili staggers back, breathing hard. Cilan wipes ash from a table and slowly reaches into his pocket.")
+    time.sleep(1.0)
+    print('\nCilan (quietly): "We don’t have much… but this symbol matters. Take it."')
+    # give Trio Badge
+    game.player.add_item("badges", "Trio Badge", 1)
+    add_journal("You defeated Cilan and Chili in the Striaton Gym. You received the Trio Badge (cracked).")
+    story_flags["striaton_gym_cleared"] = True
+    story_flags['next_objective'] = "Return to Elara or continue exploring Striaton."
+    time.sleep(1.0)
+    print("\nElara steps forward for a moment, eyes soft.")
+    print('"You did well. Keep your heart steady — the ruins ahead will test it."')
+    time.sleep(0.8)
+    print('She turns, then walks away into the evening fog. "I must go west, to the ruins by Nacrene," she says, voice distant.')
+    add_journal("Elara left Striaton Town heading toward the ruins west of Nacrene.")
+    # mark Elara leaving (we won't track her location fully here)
+    game.player.reputation["solace"] += 2
+
+# ------------------------------
+# Developer menu (unchanged)
+# ------------------------------
+def dev_menu(game):
+    global DEV_FORCED_NIGHT
+    while True:
+        print("\n--- DEVELOPER MENU ---")
+        print("[1] Teleport to location")
+        print("[2] View player data")
+        print("[3] Add money")
+        print("[4] Heal team")
+        print(f"[5] Toggle forced-night (current: {DEV_FORCED_NIGHT})")
+        print("[6] Adjust reputation")
+        print("[7] Exit dev menu")
+        choice = input("> ").strip()
+        if choice == "1":
+            locs = list(game.world.locations.keys())
+            for i,l in enumerate(locs,1):
+                print(f"{i}. {l}")
+            sel = input("Teleport to: ").strip()
+            if sel.isdigit() and 1 <= int(sel) <= len(locs):
+                game.world.current = game.world.locations[locs[int(sel)-1]]
+                print(f"Teleported to {game.world.current.name}.")
+        elif choice == "2":
+            print(json.dumps(game.player.to_dict(), indent=2))
+        elif choice == "3":
+            amt = input("Add how much money? ").strip()
+            if amt.isdigit():
+                game.player.money += int(amt)
+                print(f"Money added. New balance: ${game.player.money}")
+        elif choice == "4":
+            for p in game.player.team:
+                p.heal_full()
+            print("All team healed.")
+        elif choice == "5":
+            if DEV_FORCED_NIGHT is None:
+                DEV_FORCED_NIGHT = True
+            elif DEV_FORCED_NIGHT is True:
+                DEV_FORCED_NIGHT = False
+            else:
+                DEV_FORCED_NIGHT = None
+            print("DEV_FORCED_NIGHT set to:", DEV_FORCED_NIGHT)
+        elif choice == "6":
+            print("Reputation before:", game.player.reputation)
+            sol = input("Set Solace value (or Enter to skip): ").strip()
+            dom = input("Set Dominion value (or Enter to skip): ").strip()
+            if sol.isdigit():
+                game.player.reputation["solace"] = int(sol)
+            if dom.isdigit():
+                game.player.reputation["dominion"] = int(dom)
+            print("Reputation now:", game.player.reputation)
+        elif choice == "7":
+            break
+        else:
+            print("Invalid.")
+
+# ------------------------------
+# Main Game class (with Journal)
+# ------------------------------
+class Game:
+    instance = None
+    def __init__(self):
+        Game.instance = self
+        self.player = None
+        self.world = None
+        self.browser_mode = False
+    def title_screen(self):
+        print("="*60)
+        print("🌑 POKE ENGINE THING — STORYTIME")
+        print('v1.6 — "storytime"')
+        print("TEST BUILD — DOES NOT REFLECT HOW GAME WILL ACTUALLY PLAY (UWU)")
+        print("="*60)
+        time.sleep(0.6)
+    def start(self):
+        self.title_screen()
+        print("Choose save type:")
+        print("1. Browser memory (for web runners)")
+        print("2. Local file (save.json)")
+        self.browser_mode = (input("> ").strip() == "1")
+        while True:
+            print("\nMain Menu: 1) New Game  2) Load Game  3) Quit")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self); continue
+            if c == "1":
+                self.new_game(); break
+            elif c == "2":
+                if self.load_game(): break
+            elif c == "3":
+                print("Goodbye."); return
+            else:
+                print("Invalid.")
+    def new_game(self):
+        name = input("Enter your name: ").strip() or "Trainer"
+        self.player = Player(name)
+        add_journal("You woke up in a broken Pokémon Center after the lab incident.")
+        print("\nYou wake in a dim Pokémon Center. A faint alarm hums in the background.")
+        print("Nurse Joy approaches you, eyes tired but relieved.")
+        print("\"You're awake... the lab incident— many didn't make it. Three survivors were in the containment room.\"")
+        print("\"Choose one. They need someone.\"")
+        starters = ["Snivy","Tepig","Oshawott"]  # Cyndaquil removed
+        for i,k in enumerate(starters,1):
+            t = POKEDEX.get(k,{}).get("type","?")
+            print(f"{i}. {k} ({t}) - Survivor")
+        while True:
+            sel = input("> ").strip()
+            if sel == "sv_dev":
+                dev_menu(self); continue
+            if sel.isdigit() and 1 <= int(sel) <= len(starters):
+                starter_name = starters[int(sel)-1]
+                info = POKEDEX[starter_name]
+                p = Pokemon(starter_name,5,info["base_hp"],info["base_atk"],info["base_def"],info["moves"],info["type"])
+                self.player.add_pokemon(p)
+                # play intro cutscene (only once)
+                try:
+                    play_cutscene("intro_confrontation", self)
+                except Exception:
+                    pass
+                break
+            else:
+                print("Choose quickly, there's little time.")
+        self.world = World(self)
+        self.player.last_town = self.world.current.name
+        if any(ev in ("pokecenter","pokemart","elara_lab") for ev in self.world.current.events):
+            self.world.town_menu()
+        self.main_loop()
+    def main_loop(self):
+        while True:
+            print("\nWhat will you do next?")
+            print("1. Move  2. Team  3. Bag  4. Forage nearby  5. Save  6. Load  7. Journal  8. Quit")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self); continue
+            if c == "1":
+                self.world.move()
+            elif c == "2":
+                self.player.show_team()
+            elif c == "3":
+                self.open_bag_menu()
+            elif c == "4":
+                area = self.world.current.name
+                if area in FORAGE_AREAS:
+                    forage_area(self.player, area)
+                else:
+                    print("There's nowhere safe to forage here.")
+            elif c == "5":
+                self.save_game()
+            elif c == "6":
+                self.load_game()
+            elif c == "7":
+                self.open_journal()
+            elif c == "8":
+                print("Goodbye."); break
+            else:
+                print("Invalid.")
+    def open_bag_menu(self):
+        while True:
+            print("\n=== BAG ===")
+            print(f"Money: ${self.player.money}")
+            cats = ["food","balls","healing","status","stones","badges","back"]
+            for i,cat in enumerate(cats,1):
+                if cat=="back":
+                    print(f"{i}. Back")
+                else:
+                    items = self.player.bag.get(cat,{})
+                    print(f"{i}. {cat.title()} ({sum(items.values())} items)")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self); continue
+            if not c.isdigit() or not (1 <= int(c) <= len(cats)):
+                print("Invalid."); continue
+            idx = int(c)-1
+            if cats[idx] == "back":
+                break
+            cat = cats[idx]
+            items = self.player.bag.get(cat,{})
+            if not items:
+                print("No items in this category."); continue
+            item_list = list(items.items())
+            for i,(name,qty) in enumerate(item_list,1):
+                desc = ITEMS.get(name,{}).get("desc","")
+                print(f"{i}. {name} x{qty} - {desc}")
+            print(f"{len(item_list)+1}. Back")
+            sel = input("> ").strip()
+            if sel == "sv_dev":
+                dev_menu(self); continue
+            if not sel.isdigit(): continue
+            sel = int(sel)
+            if sel == len(item_list)+1:
+                continue
+            if not (1 <= sel <= len(item_list)): continue
+            item_name = item_list[sel-1][0]
+            print(f"\n{item_name}: 1) Use  2) Examine  3) Back")
+            sub = input("> ").strip()
+            if sub == "sv_dev":
+                dev_menu(self); continue
+            if sub == "2":
+                print(f"Examine: {ITEMS.get(item_name,{}).get('lore','No additional info.')}")
+                continue
+            if sub != "1":
+                continue
+            if cat == "food":
+                print("Use food from the team screen or in wild battles.")
+                continue
+            elif cat == "balls":
+                print("Balls are used in battle to capture Pokémon.")
+                continue
+            elif cat == "healing":
+                if not self.player.team:
+                    print("No Pokémon to heal."); continue
+                print("Choose a Pokémon to heal:")
+                for i,p in enumerate(self.player.team,1):
+                    print(f"{i}. {p.name} ({p.current_hp}/{p.max_hp})")
+                ch = input("> ").strip()
+                if ch == "sv_dev":
+                    dev_menu(self); continue
+                if not ch.isdigit() or not (1 <= int(ch) <= len(self.player.team)):
+                    print("Cancelled."); continue
+                target = self.player.team[int(ch)-1]
+                heal_vals = {"Potion":20,"Super Potion":50}
+                heal_amt = heal_vals.get(item_name,0)
+                target.current_hp = min(target.max_hp, target.current_hp + heal_amt)
+                self.player.remove_item(cat, item_name, 1)
+                print(f"{target.name} healed {heal_amt} HP.")
+            elif cat == "stones":
+                if not self.player.team:
+                    print("No Pokémon to use the stone on."); continue
+                print("Choose a Pokémon to use this stone on:")
+                for i,p in enumerate(self.player.team,1):
+                    print(f"{i}. {p.name} Lv{p.level}")
+                ch = input("> ").strip()
+                if ch == "sv_dev":
+                    dev_menu(self); continue
+                if not ch.isdigit() or not (1 <= int(ch) <= len(self.player.team)):
+                    print("Cancelled."); continue
+                target = self.player.team[int(ch)-1]
+                # stone evolution simplified: remove stone and show message
+                if self.player.remove_item("stones", item_name, 1):
+                    print(f"You used {item_name} on {target.name}. (Evolution logic not fully implemented here.)")
+                else:
+                    print("You don't have that stone.")
+    def respawn_player(self):
+        town = self.player.last_town or self.world.last_town
+        print(f"\nYou awaken safely back in {town}'s Pokémon Center.")
+        if town in self.world.locations:
+            self.world.current = self.world.locations[town]
+        else:
+            self.world.current = self.world.locations[self.world.last_town]
+        for p in self.player.team:
+            p.heal_full()
+        self.world.town_menu()
+    def save_game(self):
+        data = {"player": self.player.to_dict(), "location": self.world.current.name, "story_flags": story_flags, "journal": JOURNAL}
+        if self.browser_mode:
+            global BROWSER_SAVE
+            BROWSER_SAVE = json.dumps(data)
+            print("💾 Game saved to browser memory (temporary).")
+            add_journal("Saved game to browser memory.")
+        else:
+            with open(SAVE_FILE,"w") as f:
+                json.dump(data,f,indent=2)
+            print(f"💾 Game saved to {SAVE_FILE}.")
+            add_journal("Saved game to disk.")
+    def load_game(self):
+        global BROWSER_SAVE, JOURNAL
+        data = None
+        if self.browser_mode:
+            if not BROWSER_SAVE:
+                print("No browser save found."); return False
+            data = json.loads(BROWSER_SAVE)
+        else:
+            if not os.path.exists(SAVE_FILE):
+                print("No save file found."); return False
+            with open(SAVE_FILE,"r") as f:
+                data = json.load(f)
+        self.player = Player.from_dict(data["player"])
+        # restore story flags
+        sf = data.get("story_flags",{})
+        for k,v in sf.items():
+            story_flags[k] = v
+        # restore journal
+        JOURNAL = data.get("journal", JOURNAL)
+        self.world = World(self)
+        self.world.current = self.world.locations.get(data.get("location","Nuvema Outpost"), self.world.current)
+        print("✅ Game loaded.")
+        if any(ev in ("pokecenter","pokemart","elara_lab") for ev in self.world.current.events):
+            self.world.town_menu()
+        else:
+            self.main_loop()
+        return True
+    def open_journal(self):
+        while True:
+            print("\n=== JOURNAL ===")
+            print("1. Story Entries")
+            print("2. Current Objective")
+            print("3. Reputation")
+            print("4. Pokémon Relationships")
+            print("5. Save Game")
+            print("6. Close Journal")
+            c = input("> ").strip()
+            if c == "sv_dev":
+                dev_menu(self); continue
+            if c == "1":
+                if not JOURNAL:
+                    print("\n(Your journal is empty.)")
+                else:
+                    print("\n-- Story Entries --")
+                    for e in JOURNAL[-50:]:
+                        print(e)
+            elif c == "2":
+                print("\nCurrent Objective:", story_flags.get("next_objective","None"))
+            elif c == "3":
+                print("\nReputation — Team Solace:", self.player.reputation.get("solace",0), "| Team Dominion:", self.player.reputation.get("dominion",0))
+            elif c == "4":
+                print("\nPokémon Relationships:")
+                for p in self.player.team:
+                    print(f"- {p.name}: Trust {p.trust}")
+            elif c == "5":
+                self.save_game()
+            elif c == "6":
+                break
+            else:
+                print("Invalid.")
+
+# ------------------------------
+# Launch
+# ------------------------------
+if __name__ == "__main__":
+    game = Game()
+    game.start()
+ self.player.reputation.get("solace",0), "| Team Dominion:", self.player.reputation.get("dominion",0))
+            elif c == "4":
+                print("\nPokémon Relationships:")
+                for p in self.player.team:
+                    print(f"- {p.name}: Trust {p.trust}")
+            elif c == "5":
+                self.save_game()
+            elif c == "6":
+                break
+            else:
+                print("Invalid.")
+
+# ------------------------------
+# Launch
+# ------------------------------
+if __name__ == "__main__":
+    game = Game()
+    game.start()
+￼Enter file contents here
